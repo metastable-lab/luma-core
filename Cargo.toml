@@ -1,0 +1,58 @@
+[package]
+name = "luma-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Sans-IO reverse-engineered BLE wire protocol for E09 / Watchfun-platform smart glasses."
+readme = "README.md"
+keywords = ["ble", "bluetooth", "protocol", "smart-glasses", "sans-io"]
+categories = ["parser-implementations", "embedded"]
+
+[lib]
+name = "luma_core"
+# `staticlib` is what an iOS app links, and it is deliberately NOT a
+# `.framework`/`.xcframework` — a plain static archive plus generated Swift needs no
+# binary-target plumbing.
+#
+# `cdylib` exists so `uniffi-bindgen` can introspect a host build to emit the bindings.
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
+# The ONLY dependency, and it is optional. With default features off this crate compiles
+# against nothing but `std` — that is the point of the `uniffi` feature gate below.
+#
+# `default-features = false` is load-bearing, not tidiness. `uniffi`'s default feature is
+# `cargo-metadata`, and `cli` implies `bindgen`; between them they drag `uniffi_bindgen`,
+# `clap`, `askama` and `cargo_metadata` into the graph, and `cargo_metadata 0.23` depends on
+# `cargo-platform 0.3.3`, which declares `rust-version = 1.91`. Every consumer inherits that
+# floor. See the `bindgen` feature below.
+uniffi = { version = "0.32", default-features = false, optional = true }
+
+[features]
+default = []
+
+# The UniFFI boundary: `src/ffi.rs`, the `setup_scaffolding!()` call and the `uniffi`
+# dependency. Off by default so the pure Rust library has ZERO dependencies.
+uniffi = ["dep:uniffi"]
+
+# OFF by default, and it must stay that way: this is the bindings GENERATOR's toolchain, not
+# the library's. `uniffi/cli` re-adds `bindgen` + `clap` + `camino` and
+# `uniffi/cargo-metadata` re-adds `cargo_metadata` — all of which stay out of every build that
+# only wants the library (the iOS staticlib, the Android `.so`s).
+#
+# The `[[bin]]` below declares `required-features = ["bindgen"]`, so a plain `cargo build` or
+# `cargo test` silently skips the binary rather than failing.
+bindgen = ["uniffi", "uniffi/cli", "uniffi/cargo-metadata"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[[example]]
+name = "decode"
+path = "examples/decode.rs"
+
+[[example]]
+name = "commands"
+path = "examples/commands.rs"

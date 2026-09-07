@@ -1,0 +1,25 @@
+# Rust
+/target
+
+# Generated bindings — regenerate with bindings/generate.sh, never commit.
+/bindings/out
+
+# Generated iOS bindings and static archives — produced by ios/build-core.sh.
+# The .gitkeep files stay so the SPM package still resolves on a fresh clone.
+/ios/lib/
+/ios/LumaCore/Sources/LumaCore/Generated/*
+!/ios/LumaCore/Sources/LumaCore/Generated/.gitkeep
+/ios/LumaCore/Sources/LumaCoreFFI/include/*
+!/ios/LumaCore/Sources/LumaCoreFFI/include/.gitkeep
+
+# Xcode / SPM local state. The .xcodeproj itself IS committed — xcodegen produces
+# it from ios/project.yml, and committing it means a clone can open the project
+# without installing xcodegen first.
+/ios/LumaCore/.build/
+/ios/**/xcuserdata/
+/ios/**/*.xcworkspace/xcshareddata/swiftpm/
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc

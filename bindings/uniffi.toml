@@ -1,0 +1,31 @@
+# UniFFI bindings configuration, in the 0.32 "global config" shape.
+#
+# Passed to the generator as `--config bindings/uniffi.toml` by `generate.sh`.
+# The crate's Rust namespace is `luma_core` (from `[lib] name` in
+# Cargo.toml); both spellings are listed so the lookup hits whichever the
+# generator uses for this crate.
+
+[defaults.bindings.swift]
+# The Swift module the generated `.swift` file belongs to. Import this from an
+# iOS app: `import LumaCore`.
+module_name = "LumaCore"
+cdylib_name = "luma_core"
+
+[defaults.bindings.kotlin]
+package_name = "luma.core"
+cdylib_name = "luma_core"
+
+[defaults.bindings.python]
+cdylib_name = "luma_core"
+
+[crates.luma_core.bindings.swift]
+module_name = "LumaCore"
+
+[crates.luma_core.bindings.kotlin]
+package_name = "luma.core"
+
+[crates.luma-core.bindings.swift]
+module_name = "LumaCore"
+
+[crates.luma-core.bindings.kotlin]
+package_name = "luma.core"
