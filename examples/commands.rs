@@ -10,7 +10,7 @@
 //! beside it, so this listing cannot drift from the builders.
 //!
 //! `Capture` means the byte was seen on the wire; `DeviceProbe` means it was answered by a
-//! unit under test; `ClientOnly` means a vendor app declares it and no capture contains it.
+//! unit under test; `ClientOnly` means the platform defines it and no session has exercised it.
 
 use luma_core::commands as cmd;
 use luma_core::opcodes::{AppCommand, GestureAction, GestureSlot, VolumeChannel};
@@ -18,14 +18,20 @@ use luma_core::parser::{Orientation, WifiService};
 use luma_core::{decode_app, LedLevel};
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Decode our own output so the opcode column is derived, never asserted.
 fn show(name: &str, frame: Vec<u8>) {
     let decoded = decode_app(&frame).expect("every builder emits a decodable frame");
     let op = AppCommand::from_code(decoded.cmd);
-    let evidence = op.map(|o| format!("{:?}", o.evidence())).unwrap_or_else(|| "?".into());
+    let evidence = op
+        .map(|o| format!("{:?}", o.evidence()))
+        .unwrap_or_else(|| "?".into());
     let named = op.map(|o| format!("{o:?}")).unwrap_or_else(|| "?".into());
     println!(
         "{:<36} {:#04x} {:<22} {:<11} {}",
@@ -54,9 +60,18 @@ fn main() {
 
     println!("\n-- files and Wi-Fi ----------------------------------------------------------");
     show("get_file_count()", cmd::get_file_count());
-    show("open_wifi(Files, false)", cmd::open_wifi(WifiService::Files, false));
-    show("open_wifi(Live, false)", cmd::open_wifi(WifiService::Live, false));
-    show("open_wifi(Files, true)  # p2p", cmd::open_wifi(WifiService::Files, true));
+    show(
+        "open_wifi(Files, false)",
+        cmd::open_wifi(WifiService::Files, false),
+    );
+    show(
+        "open_wifi(Live, false)",
+        cmd::open_wifi(WifiService::Live, false),
+    );
+    show(
+        "open_wifi(Files, true)  # p2p",
+        cmd::open_wifi(WifiService::Files, true),
+    );
     show("file_download_complete()", cmd::file_download_complete());
     show("file_download_partial(3)", cmd::file_download_partial(3));
     show("power_off_isp()", cmd::power_off_isp());
@@ -66,13 +81,25 @@ fn main() {
     show("play_pause(true)", cmd::play_pause(true));
     show("volume_step(true)", cmd::volume_step(true));
     show("answer_hangup(true)", cmd::answer_hangup(true));
-    show("set_volume(System, 7)", cmd::set_volume(VolumeChannel::System, 7));
-    show("set_volume(Media, 7)", cmd::set_volume(VolumeChannel::Media, 7));
-    show("set_volume(Call, 7)", cmd::set_volume(VolumeChannel::Call, 7));
+    show(
+        "set_volume(System, 7)",
+        cmd::set_volume(VolumeChannel::System, 7),
+    );
+    show(
+        "set_volume(Media, 7)",
+        cmd::set_volume(VolumeChannel::Media, 7),
+    );
+    show(
+        "set_volume(Call, 7)",
+        cmd::set_volume(VolumeChannel::Call, 7),
+    );
     show("get_volumes()", cmd::get_volumes());
 
     println!("\n-- voice --------------------------------------------------------------------");
-    show("interrupt_voice()  # closes the mic", cmd::interrupt_voice());
+    show(
+        "interrupt_voice()  # closes the mic",
+        cmd::interrupt_voice(),
+    );
     show("retransmit_voice()", cmd::retransmit_voice());
     show("get_voice_disable_state()", cmd::get_voice_disable_state());
 
@@ -82,9 +109,18 @@ fn main() {
     show("set_record_duration(180)", cmd::set_record_duration(180));
     show("set_wear_detection(true)", cmd::set_wear_detection(true));
     show("set_voice_command(true)", cmd::set_voice_command(true));
-    show("set_orientation(Portrait)", cmd::set_orientation(Orientation::Portrait));
-    show("set_orientation(Landscape)", cmd::set_orientation(Orientation::Landscape));
-    show("set_offline_voice_language(true)", cmd::set_offline_voice_language(true));
+    show(
+        "set_orientation(Portrait)",
+        cmd::set_orientation(Orientation::Portrait),
+    );
+    show(
+        "set_orientation(Landscape)",
+        cmd::set_orientation(Orientation::Landscape),
+    );
+    show(
+        "set_offline_voice_language(true)",
+        cmd::set_offline_voice_language(true),
+    );
 
     println!("\n-- gesture slots ------------------------------------------------------------");
     for slot in GestureSlot::ALL {
@@ -99,7 +135,10 @@ fn main() {
         "send_phone_time(2026-07-27 18:40:18)",
         cmd::send_phone_time(2026, 7, 27, 18, 40, 18),
     );
-    show("get_switch_states()  # burst reply", cmd::get_switch_states());
+    show(
+        "get_switch_states()  # burst reply",
+        cmd::get_switch_states(),
+    );
     show("get_device_status()", cmd::get_device_status());
     show("get_battery()", cmd::get_battery());
     show("get_versions()", cmd::get_versions());

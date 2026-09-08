@@ -194,7 +194,11 @@ pub enum FileKind {
 
 impl FileKind {
     /// Every declared type byte, ascending.
-    pub const ALL: [FileKind; 3] = [FileKind::ImageThumb, FileKind::HdImage, FileKind::VideoThumb];
+    pub const ALL: [FileKind; 3] = [
+        FileKind::ImageThumb,
+        FileKind::HdImage,
+        FileKind::VideoThumb,
+    ];
 
     /// The wire byte.
     pub fn code(self) -> u8 {
@@ -395,10 +399,17 @@ pub enum FileAbort {
     ImplausibleSize { declared_total: usize },
     /// A `0x97` arrived while a transfer was still in flight. Both reference implementations restart silently and
     /// the partial file evaporates.
-    Superseded { received: usize, declared_total: usize },
+    Superseded {
+        received: usize,
+        declared_total: usize,
+    },
     /// A `0x98` addressed bytes outside the declared file. The stream is not what the header
     /// said it would be, so the transfer is closed rather than grown to fit.
-    OutOfRange { addr: usize, end: usize, declared_total: usize },
+    OutOfRange {
+        addr: usize,
+        end: usize,
+        declared_total: usize,
+    },
     /// A `0x99` arrived with fewer bytes GENUINELY delivered than declared. `first_gap` is the
     /// offset of the first byte never received — `None` would mean the tail is simply missing,
     /// which cannot happen here because a short tail is itself a gap below `declared_total`.
@@ -407,14 +418,21 @@ pub enum FileAbort {
     /// have fragmented into more than `MAX_RECEIVED_SPANS` disjoint spans: every span is a
     /// hole, so the file cannot complete, and continuing to track them is unbounded work on a
     /// wire-supplied count.
-    Incomplete { received: usize, declared_total: usize, first_gap: Option<usize> },
+    Incomplete {
+        received: usize,
+        declared_total: usize,
+        first_gap: Option<usize>,
+    },
 }
 
 /// What a chunk of `AA15` bytes did to the transfer state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileEvent {
     /// A `0x97` header opened a transfer.
-    Started { declared_total: usize, file_type: u8 },
+    Started {
+        declared_total: usize,
+        file_type: u8,
+    },
     /// A `0x99` closed one, and every declared byte was genuinely delivered.
     Completed(ReassembledFile),
     /// The transfer ended with nothing to hand over.
@@ -543,7 +561,8 @@ impl FileReassembler {
         if payload.len() < 5 {
             return;
         }
-        let declared_total = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
+        let declared_total =
+            u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
         let file_type = payload[4];
 
         if let Some(t) = self.transfer.take() {
@@ -559,7 +578,9 @@ impl FileReassembler {
         // The ONLY place the ceiling is enforced. Refusing here rather than clamping is what
         // makes every later allocation bounded by an already-validated number.
         if declared_total == 0 || declared_total > MAX_FILE_BYTES {
-            events.push(FileEvent::Aborted(FileAbort::ImplausibleSize { declared_total }));
+            events.push(FileEvent::Aborted(FileAbort::ImplausibleSize {
+                declared_total,
+            }));
             return;
         }
 
@@ -569,7 +590,10 @@ impl FileReassembler {
             data: Vec::new(),
             received: ReceivedRanges::default(),
         });
-        events.push(FileEvent::Started { declared_total, file_type });
+        events.push(FileEvent::Started {
+            declared_total,
+            file_type,
+        });
     }
 
     fn on_data(&mut self, payload: &[u8], events: &mut Vec<FileEvent>) {
@@ -741,7 +765,10 @@ mod tests {
 
     fn hex(s: &str) -> Vec<u8> {
         let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-        assert!(s.len().is_multiple_of(2), "hex literal must be byte-aligned");
+        assert!(
+            s.len().is_multiple_of(2),
+            "hex literal must be byte-aligned"
+        );
         (0..s.len() / 2)
             .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).expect("valid hex"))
             .collect()
@@ -775,7 +802,9 @@ mod tests {
     /// content-addressed by offset so a misplaced chunk shows up as a byte mismatch rather than
     /// as a length that happens to match.
     fn transfer(total: usize, file_type: u8) -> (Vec<u8>, Vec<Vec<u8>>) {
-        let body: Vec<u8> = (0..total).map(|i| (i as u8).wrapping_mul(31).wrapping_add(7)).collect();
+        let body: Vec<u8> = (0..total)
+            .map(|i| (i as u8).wrapping_mul(31).wrapping_add(7))
+            .collect();
         let mut frames = vec![{
             let mut p = (total as u32).to_be_bytes().to_vec();
             p.push(file_type);
@@ -830,13 +859,24 @@ mod tests {
         let f = decode_file_frame(&last).expect("the captured short tail decodes");
         assert_eq!(f.cmd, FileOpcode::Data.code());
         let addr = u32::from_be_bytes([f.data[0], f.data[1], f.data[2], f.data[3]]) as usize;
-        assert_eq!((addr, f.data.len() - 4), (10_912, 36), "22 x 496, then 36 bytes");
-        assert_eq!(addr + (f.data.len() - 4), 10_948, "the tail lands exactly on the total");
+        assert_eq!(
+            (addr, f.data.len() - 4),
+            (10_912, 36),
+            "22 x 496, then 36 bytes"
+        );
+        assert_eq!(
+            addr + (f.data.len() - 4),
+            10_948,
+            "the tail lands exactly on the total"
+        );
         assert_eq!(encode_file_frame(f.cmd, &f.data), last);
 
         let end = hex(GOLDEN_END);
         let f = decode_file_frame(&end).expect("the captured end frame decodes");
-        assert_eq!((f.cmd, f.data.as_slice()), (FileOpcode::End.code(), &[0x00][..]));
+        assert_eq!(
+            (f.cmd, f.data.as_slice()),
+            (FileOpcode::End.code(), &[0x00][..])
+        );
         assert_eq!(encode_file_frame(f.cmd, &f.data), end);
     }
 
@@ -847,7 +887,11 @@ mod tests {
         let bytes = hex("525800079700002ac402875852");
         let len = ((bytes[2] as usize) << 8) | bytes[3] as usize;
         assert_eq!(len, 7, "cmd + 5 payload + checksum");
-        assert_eq!(bytes.len(), FRAME_OVERHEAD + len + 2, "magic and trailer are outside len");
+        assert_eq!(
+            bytes.len(),
+            FRAME_OVERHEAD + len + 2,
+            "magic and trailer are outside len"
+        );
         assert_eq!(checksum(0x97, &bytes[5..10]), 0x87);
         assert_eq!(bytes[10], 0x87);
         assert_eq!(&bytes[11..], &FILE_TRAILER);
@@ -859,8 +903,16 @@ mod tests {
     /// how the device actually delivers them.
     #[test]
     fn the_captured_transfer_geometries_reassemble_to_the_declared_total() {
-        for (total, chunks, tail) in [(10_532usize, 21usize, 116usize), (13_472, 27, 80), (10_948, 22, 36)] {
-            assert_eq!(chunks * CAPTURED_CHUNK_BYTES + tail, total, "geometry table");
+        for (total, chunks, tail) in [
+            (10_532usize, 21usize, 116usize),
+            (13_472, 27, 80),
+            (10_948, 22, 36),
+        ] {
+            assert_eq!(
+                chunks * CAPTURED_CHUNK_BYTES + tail,
+                total,
+                "geometry table"
+            );
             let (body, frames) = transfer(total, FileKind::HdImage.code());
             assert_eq!(frames.len(), chunks + 3, "info + data frames + end");
 
@@ -871,7 +923,10 @@ mod tests {
             }
             assert_eq!(
                 events.first(),
-                Some(&FileEvent::Started { declared_total: total, file_type: 0x02 })
+                Some(&FileEvent::Started {
+                    declared_total: total,
+                    file_type: 0x02
+                })
             );
             let file = completed(&events).unwrap_or_else(|| panic!("{total} did not complete"));
             assert_eq!(file.data, body);
@@ -892,7 +947,10 @@ mod tests {
         // Everything in one notification.
         let mut r = FileReassembler::new();
         let events = r.push(&stream);
-        assert_eq!(completed(&events).map(|f| f.data.clone()), Some(body.clone()));
+        assert_eq!(
+            completed(&events).map(|f| f.data.clone()),
+            Some(body.clone())
+        );
 
         // One byte at a time.
         let mut r = FileReassembler::new();
@@ -900,14 +958,21 @@ mod tests {
         for b in &stream {
             events.extend(r.push(&[*b]));
         }
-        assert_eq!(completed(&events).map(|f| f.data.clone()), Some(body.clone()));
+        assert_eq!(
+            completed(&events).map(|f| f.data.clone()),
+            Some(body.clone())
+        );
 
         // And split at every possible boundary.
         for cut in 1..stream.len() {
             let mut r = FileReassembler::new();
             let mut events = r.push(&stream[..cut]);
             events.extend(r.push(&stream[cut..]));
-            assert_eq!(completed(&events).map(|f| f.data.len()), Some(body.len()), "split at {cut}");
+            assert_eq!(
+                completed(&events).map(|f| f.data.len()),
+                Some(body.len()),
+                "split at {cut}"
+            );
         }
     }
 
@@ -925,7 +990,10 @@ mod tests {
             }
             events.extend(r.push(f));
         }
-        assert!(completed(&events).is_none(), "a holey file must not be delivered");
+        assert!(
+            completed(&events).is_none(),
+            "a holey file must not be delivered"
+        );
         assert_eq!(
             aborts(&events),
             vec![FileAbort::Incomplete {
@@ -986,7 +1054,11 @@ mod tests {
             events.extend(r.push(f));
             events.extend(r.push(f));
         }
-        assert_eq!(r.progress().received, 2_000, "a duplicate adds no bytes to the count");
+        assert_eq!(
+            r.progress().received,
+            2_000,
+            "a duplicate adds no bytes to the count"
+        );
         events.extend(r.push(end));
         assert_eq!(completed(&events).map(|f| f.data.clone()), Some(body));
     }
@@ -1030,7 +1102,10 @@ mod tests {
         let mut coalesced = corrupt.clone();
         coalesced.extend_from_slice(&frames[frames.len() - 1]);
 
-        assert_eq!(decode_file_frame(&corrupt), Err(FileFrameError::ChecksumMismatch));
+        assert_eq!(
+            decode_file_frame(&corrupt),
+            Err(FileFrameError::ChecksumMismatch)
+        );
         events.extend(r.push(&coalesced));
         assert_eq!(
             completed(&events).map(|f| f.data.clone()),
@@ -1054,7 +1129,10 @@ mod tests {
         let events = r.push(&stream);
         assert_eq!(
             events,
-            vec![FileEvent::Started { declared_total: 10, file_type: 0x02 }],
+            vec![FileEvent::Started {
+                declared_total: 10,
+                file_type: 0x02
+            }],
             "the bad frame is dropped and the good one behind it still lands"
         );
         assert!(!r.has_buffered_frame_data());
@@ -1066,13 +1144,22 @@ mod tests {
     #[test]
     fn an_oversized_length_resyncs_instead_of_waiting_forever() {
         let mut stream = vec![0x52, 0x58, 0xFF, 0xFF]; // len = 65535
-        stream.extend_from_slice(&encode_file_frame(FileOpcode::Info.code(), &[0, 0, 0, 4, 0x02]));
+        stream.extend_from_slice(&encode_file_frame(
+            FileOpcode::Info.code(),
+            &[0, 0, 0, 4, 0x02],
+        ));
 
         let mut r = FileReassembler::new();
         let events = r.push(&stream);
-        assert!(matches!(events.first(), Some(FileEvent::Desynced { .. })), "{events:?}");
         assert!(
-            events.contains(&FileEvent::Started { declared_total: 4, file_type: 0x02 }),
+            matches!(events.first(), Some(FileEvent::Desynced { .. })),
+            "{events:?}"
+        );
+        assert!(
+            events.contains(&FileEvent::Started {
+                declared_total: 4,
+                file_type: 0x02
+            }),
             "one bad length costs a resync, not the rest of the stream: {events:?}"
         );
         assert!(!r.has_buffered_frame_data());
@@ -1101,10 +1188,21 @@ mod tests {
         assert_eq!(events.first(), Some(&FileEvent::Desynced { dropped: 4 }));
 
         let mut r = FileReassembler::new();
-        assert_eq!(r.push(&[0x00, 0x52]), vec![FileEvent::Desynced { dropped: 1 }]);
-        assert_eq!(r.buffered(), &[0x52], "the trailing 0x52 is half a header, not junk");
+        assert_eq!(
+            r.push(&[0x00, 0x52]),
+            vec![FileEvent::Desynced { dropped: 1 }]
+        );
+        assert_eq!(
+            r.buffered(),
+            &[0x52],
+            "the trailing 0x52 is half a header, not junk"
+        );
         let events = r.push(&good[1..]);
-        assert_eq!(aborts(&events), vec![FileAbort::NoFileInfo], "the frame completed");
+        assert_eq!(
+            aborts(&events),
+            vec![FileAbort::NoFileInfo],
+            "the frame completed"
+        );
         assert!(!r.has_buffered_frame_data());
     }
 
@@ -1119,8 +1217,14 @@ mod tests {
             assert!(r.buffered().len() <= FILE_FRAME_OVERHEAD + MAX_LENGTH_FIELD);
         }
         // …and a real frame after the flood still lands.
-        let events = r.push(&encode_file_frame(FileOpcode::Info.code(), &[0, 0, 0, 4, 0x02]));
-        assert!(events.contains(&FileEvent::Started { declared_total: 4, file_type: 0x02 }));
+        let events = r.push(&encode_file_frame(
+            FileOpcode::Info.code(),
+            &[0, 0, 0, 4, 0x02],
+        ));
+        assert!(events.contains(&FileEvent::Started {
+            declared_total: 4,
+            file_type: 0x02
+        }));
     }
 
     /// A `0x99` with no header cannot be checked and must not be delivered: there is no
@@ -1158,14 +1262,18 @@ mod tests {
             let events = r.push(&encode_file_frame(FileOpcode::Info.code(), &p));
             assert_eq!(
                 aborts(&events),
-                vec![FileAbort::ImplausibleSize { declared_total: total as usize }]
+                vec![FileAbort::ImplausibleSize {
+                    declared_total: total as usize
+                }]
             );
             assert!(!r.progress().is_active());
 
             // A data frame behind it therefore has nothing to grow.
             let mut d = 0u32.to_be_bytes().to_vec();
             d.extend_from_slice(&[0x01; 16]);
-            assert!(r.push(&encode_file_frame(FileOpcode::Data.code(), &d)).is_empty());
+            assert!(r
+                .push(&encode_file_frame(FileOpcode::Data.code(), &d))
+                .is_empty());
         }
     }
 
@@ -1175,12 +1283,15 @@ mod tests {
     #[test]
     fn an_out_of_range_address_closes_the_transfer_without_losing_buffered_bytes() {
         let mut r = FileReassembler::new();
-        r.push(&encode_file_frame(FileOpcode::Info.code(), &[0, 0, 0, 100, 0x02]));
+        r.push(&encode_file_frame(
+            FileOpcode::Info.code(),
+            &[0, 0, 0, 100, 0x02],
+        ));
 
         let mut bad = 90u32.to_be_bytes().to_vec();
         bad.extend_from_slice(&[0xAA; 32]); // 90 + 32 = 122 > 100
-        // Coalesce the offending frame with the start of the NEXT header, so a reset that
-        // empties the byte buffer would eat it.
+                                            // Coalesce the offending frame with the start of the NEXT header, so a reset that
+                                            // empties the byte buffer would eat it.
         let mut stream = encode_file_frame(FileOpcode::Data.code(), &bad);
         let next = encode_file_frame(FileOpcode::Info.code(), &[0, 0, 0, 4, 0x02]);
         stream.extend_from_slice(&next[..3]);
@@ -1188,11 +1299,22 @@ mod tests {
         let events = r.push(&stream);
         assert_eq!(
             aborts(&events),
-            vec![FileAbort::OutOfRange { addr: 90, end: 122, declared_total: 100 }]
+            vec![FileAbort::OutOfRange {
+                addr: 90,
+                end: 122,
+                declared_total: 100
+            }]
         );
-        assert_eq!(r.buffered(), &next[..3], "the next frame's prefix survives the abort");
+        assert_eq!(
+            r.buffered(),
+            &next[..3],
+            "the next frame's prefix survives the abort"
+        );
         let events = r.push(&next[3..]);
-        assert!(events.contains(&FileEvent::Started { declared_total: 4, file_type: 0x02 }));
+        assert!(events.contains(&FileEvent::Started {
+            declared_total: 4,
+            file_type: 0x02
+        }));
     }
 
     /// `addr` spans the full u32 range and `usize` is exactly that wide on 32-bit Android, so
@@ -1201,11 +1323,17 @@ mod tests {
     #[test]
     fn an_address_that_wraps_the_end_offset_is_rejected() {
         let mut r = FileReassembler::new();
-        r.push(&encode_file_frame(FileOpcode::Info.code(), &[0, 0, 0, 100, 0x02]));
+        r.push(&encode_file_frame(
+            FileOpcode::Info.code(),
+            &[0, 0, 0, 100, 0x02],
+        ));
         let mut p = u32::MAX.to_be_bytes().to_vec();
         p.extend_from_slice(&[0xAA; 32]);
         let events = r.push(&encode_file_frame(FileOpcode::Data.code(), &p));
-        assert!(matches!(aborts(&events).as_slice(), [FileAbort::OutOfRange { .. }]), "{events:?}");
+        assert!(
+            matches!(aborts(&events).as_slice(), [FileAbort::OutOfRange { .. }]),
+            "{events:?}"
+        );
     }
 
     /// A second `0x97` mid-transfer restarts the device's side. Both reference implementations drop the partial
@@ -1287,12 +1415,19 @@ mod tests {
     fn the_received_span_count_is_capped() {
         let mut s = ReceivedRanges::default();
         for i in 0..MAX_RECEIVED_SPANS {
-            assert!(s.insert(i * 4, i * 4 + 2), "span {i} is still inside the cap");
+            assert!(
+                s.insert(i * 4, i * 4 + 2),
+                "span {i} is still inside the cap"
+            );
         }
         assert_eq!(s.spans.len(), MAX_RECEIVED_SPANS);
         // A new hole is refused...
         assert!(!s.insert(MAX_RECEIVED_SPANS * 4, MAX_RECEIVED_SPANS * 4 + 2));
-        assert_eq!(s.spans.len(), MAX_RECEIVED_SPANS, "and nothing was recorded");
+        assert_eq!(
+            s.spans.len(),
+            MAX_RECEIVED_SPANS,
+            "and nothing was recorded"
+        );
     }
 
     /// End to end: the cap ends the transfer with the outcome the `0x99` would have reported,
@@ -1347,10 +1482,17 @@ mod tests {
     #[test]
     fn the_file_opcodes_collide_with_the_voice_opcodes_by_value() {
         use crate::DeviceUpload;
-        assert_eq!(FileOpcode::Info.code(), DeviceUpload::VoiceUploadStart.code());
+        assert_eq!(
+            FileOpcode::Info.code(),
+            DeviceUpload::VoiceUploadStart.code()
+        );
         assert_eq!(FileOpcode::End.code(), DeviceUpload::VoiceUploadEnd.code());
         assert_eq!(FileOpcode::from_code(0x98), Some(FileOpcode::Data));
-        assert_eq!(FileOpcode::from_code(0x46), None, "voice PCM is not a file frame");
+        assert_eq!(
+            FileOpcode::from_code(0x46),
+            None,
+            "voice PCM is not a file frame"
+        );
         // The envelopes do not accept each other's bytes.
         let file = hex(GOLDEN_END);
         assert_eq!(
@@ -1366,7 +1508,10 @@ mod tests {
     #[test]
     fn short_input_is_too_short_rather_than_a_header_or_checksum_error() {
         assert_eq!(decode_file_frame(&[]), Err(FileFrameError::TooShort));
-        assert_eq!(decode_file_frame(&[0x52, 0x58, 0x00, 0x03]), Err(FileFrameError::TooShort));
+        assert_eq!(
+            decode_file_frame(&[0x52, 0x58, 0x00, 0x03]),
+            Err(FileFrameError::TooShort)
+        );
         // Header and length present, body short: waiting can fix this.
         assert_eq!(
             decode_file_frame(&hex("5258000797000029")),

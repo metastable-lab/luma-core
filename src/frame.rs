@@ -391,7 +391,10 @@ mod tests {
     use crate::opcodes::{DeviceUpload, GestureSlot};
 
     fn hex(s: &str) -> Vec<u8> {
-        assert!(s.len().is_multiple_of(2), "hex literal must be byte-aligned");
+        assert!(
+            s.len().is_multiple_of(2),
+            "hex literal must be byte-aligned"
+        );
         (0..s.len() / 2)
             .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).expect("valid hex"))
             .collect()
@@ -463,12 +466,7 @@ mod tests {
             &[0x06, 0x07, 0x06],
             "volumes [system, media, call] after three 0x70 writes of 06/07/06",
         ),
-        (
-            "ac550003970198",
-            0x97,
-            &[0x01],
-            "wake-word capture started",
-        ),
+        ("ac550003970198", 0x97, &[0x01], "wake-word capture started"),
         (
             "ac550003670168",
             0x67,
@@ -506,13 +504,38 @@ mod tests {
             &[0x1A, 0x07, 0x1B, 0x12, 0x28, 0x12],
             "phone time 2026-07-27 18:40:18 — plain hex, NOT BCD",
         ),
-        ("ab550003640064", 0x64, &[0x00], "project-name read, 0x00 filler"),
+        (
+            "ab550003640064",
+            0x64,
+            &[0x00],
+            "project-name read, 0x00 filler",
+        ),
         ("ab550003170017", 0x17, &[0x00], "battery read, 0x00 filler"),
-        ("ab550003673097", 0x67, &[0x30], "openWiFi LIVE, AP mode (GlassX)"),
+        (
+            "ab550003673097",
+            0x67,
+            &[0x30],
+            "openWiFi LIVE, AP mode (GlassX)",
+        ),
         ("ab550003393069", 0x39, &[0x30], "openWiFi FILES, AP mode"),
-        ("ab55000470010778", 0x70, &[0x01, 0x07], "set media volume to 7"),
-        ("ab55000444300175", 0x44, &[0x30, 0x01], "ISP off without clearing the count"),
-        ("ab5500040200b4b6", 0x02, &[0x00, 0xB4], "record duration 180s"),
+        (
+            "ab55000470010778",
+            0x70,
+            &[0x01, 0x07],
+            "set media volume to 7",
+        ),
+        (
+            "ab55000444300175",
+            0x44,
+            &[0x30, 0x01],
+            "ISP off without clearing the count",
+        ),
+        (
+            "ab5500040200b4b6",
+            0x02,
+            &[0x00, 0xB4],
+            "record duration 180s",
+        ),
     ];
 
     /// The load-bearing test: every golden capture frame decodes to the stated cmd/data AND
@@ -565,7 +588,11 @@ mod tests {
             .filter(|f| GestureSlot::from_code(f.cmd).is_some())
             .map(|f| f.data[0])
             .collect();
-        assert_eq!(slots, GestureSlot::CAPTURED_DEFAULTS, "the '0 1 2 4 3' default");
+        assert_eq!(
+            slots,
+            GestureSlot::CAPTURED_DEFAULTS,
+            "the '0 1 2 4 3' default"
+        );
         // No frame in the burst is keyed 0x48 — the request opcode never comes back.
         assert!(!frames.iter().any(|f| f.cmd == 0x48));
     }
@@ -593,7 +620,11 @@ mod tests {
         let bytes = hex("ac55000a645431000030333033af");
         let len = ((bytes[2] as usize) << 8) | bytes[3] as usize;
         assert_eq!(len, 10, "cmd + 8 data + checksum");
-        assert_eq!(bytes.len(), FRAME_OVERHEAD + len, "header is NOT counted in len");
+        assert_eq!(
+            bytes.len(),
+            FRAME_OVERHEAD + len,
+            "header is NOT counted in len"
+        );
         // Checksum covers cmd + data only.
         assert_eq!(checksum(0x64, &bytes[5..13]), 0xAF);
         assert_eq!(*bytes.last().unwrap(), 0xAF);
@@ -608,7 +639,10 @@ mod tests {
     fn an_empty_payload_becomes_the_protocol_mandated_filler_byte() {
         assert_eq!(encode(0x17, &[]), hex("ab550003170017"));
         assert_eq!(encode(0x17, &[0x00]), hex("ab550003170017"));
-        assert_eq!(encode_command(AppCommand::GetBattery, &[]), hex("ab550003170017"));
+        assert_eq!(
+            encode_command(AppCommand::GetBattery, &[]),
+            hex("ab550003170017")
+        );
         // The filler is a real data byte, so it survives the round trip.
         assert_eq!(decode_app(&encode(0x17, &[])).unwrap().data, vec![0x00]);
     }
@@ -666,13 +700,19 @@ mod tests {
             matches!(&residual, Residual::Foreign(b) if b.starts_with(&[0xFF, 0xFF])),
             "{residual:?}"
         );
-        assert!(d.buffered().is_empty(), "an unsatisfiable length must not stay buffered");
+        assert!(
+            d.buffered().is_empty(),
+            "an unsatisfiable length must not stay buffered"
+        );
         // The next notification starts clean, so one bad length costs one resync, not a link.
         let frames = d.push(&hex("ac550006950000040ba4"));
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].cmd, 0x95);
 
-        assert_eq!(decode_device(&[0xAC, 0x55, 0xFF, 0xFF, 0, 0]), Err(DecodeError::BadLength));
+        assert_eq!(
+            decode_device(&[0xAC, 0x55, 0xFF, 0xFF, 0, 0]),
+            Err(DecodeError::BadLength)
+        );
     }
 
     /// `len < 2` cannot describe even a cmd and a checksum. Same resync, different cause.
@@ -721,7 +761,10 @@ mod tests {
         let (frames, residual) = d.push_detailed(&stream);
         assert_eq!(frames.len(), 1);
         assert_eq!(residual, Residual::Foreign(vec![0x52, 0x58, 0x00, 0x07]));
-        assert!(d.buffered().is_empty(), "foreign bytes must not stay buffered");
+        assert!(
+            d.buffered().is_empty(),
+            "foreign bytes must not stay buffered"
+        );
 
         // A genuine partial control frame is kept instead.
         let (frames, residual) = d.push_detailed(&[0xAC, 0x55, 0x00]);
@@ -829,7 +872,10 @@ mod tests {
     #[test]
     fn short_input_is_too_short_not_a_header_or_checksum_error() {
         assert_eq!(decode_device(&[]), Err(DecodeError::TooShort));
-        assert_eq!(decode_device(&[0xAC, 0x55, 0x00]), Err(DecodeError::TooShort));
+        assert_eq!(
+            decode_device(&[0xAC, 0x55, 0x00]),
+            Err(DecodeError::TooShort)
+        );
         assert_eq!(
             decode_device(&[0xAC, 0x55, 0x00, 0x06, 0x95]),
             Err(DecodeError::TooShort)

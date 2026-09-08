@@ -1,6 +1,11 @@
 //
 //  ContentView.swift
-//  One screen: status header, discovered devices, event log, two command buttons.
+//  The BLE screen: status header, discovered devices, event log, two command buttons — and
+//  the way in to the two Wi-Fi screens.
+//
+//  Bluetooth is the control plane; the media lives on the access point the glasses raise on
+//  demand. Both Wi-Fi screens start by writing a frame over THIS connection, so neither is
+//  reachable until the link is up.
 //
 
 import CoreBluetooth
@@ -17,6 +22,8 @@ struct ContentView: View {
 
                 if link.status.isConnected {
                     CommandBar(link: link)
+                    Divider()
+                    WiFiBar(link: link)
                     Divider()
                 } else {
                     DeviceList(link: link)
@@ -133,6 +140,38 @@ private struct CommandBar: View {
                 .buttonStyle(.bordered)
             Spacer()
         }
+        .padding(.horizontal)
+        .padding(.vertical, 10)
+    }
+}
+
+/// The two Wi-Fi screens. Both open the SAME access point over BLE and differ only in what
+/// the glasses serve on it — `0x39` the JSON file API, `0x67` the RTSP stream — which is
+/// exactly the `FfiGlassesWifiService` case each screen passes to `glassesOpenWifi`.
+///
+/// Only reachable while connected: each screen's first act is a write on this link.
+private struct WiFiBar: View {
+    @ObservedObject var link: GlassesLink
+
+    var body: some View {
+        HStack(spacing: 12) {
+            NavigationLink {
+                GalleryScreen(link: link)
+            } label: {
+                Label("Gallery", systemImage: "photo.on.rectangle")
+            }
+            .buttonStyle(.bordered)
+
+            NavigationLink {
+                LiveScreen(link: link)
+            } label: {
+                Label("Live view", systemImage: "video")
+            }
+            .buttonStyle(.bordered)
+
+            Spacer()
+        }
+        .disabled(!link.status.isConnected)
         .padding(.horizontal)
         .padding(.vertical, 10)
     }

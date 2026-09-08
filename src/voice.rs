@@ -179,7 +179,11 @@ impl OpusToc {
             2 => (2, true, false),
             _ => {
                 let count = *packet.get(1)?;
-                (count & 0b0011_1111, count & 0b1000_0000 != 0, count & 0b0100_0000 != 0)
+                (
+                    count & 0b0011_1111,
+                    count & 0b1000_0000 != 0,
+                    count & 0b0100_0000 != 0,
+                )
             }
         };
         Some(OpusToc {
@@ -410,7 +414,10 @@ mod tests {
 
     fn hex(s: &str) -> Vec<u8> {
         let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-        assert!(s.len().is_multiple_of(2), "hex literal must be byte-aligned");
+        assert!(
+            s.len().is_multiple_of(2),
+            "hex literal must be byte-aligned"
+        );
         (0..s.len() / 2)
             .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).expect("valid hex"))
             .collect()
@@ -472,32 +479,55 @@ mod tests {
             assert_eq!(toc.config, 9, "{why}");
             assert_eq!(toc.mode(), OpusMode::Silk, "{why}");
             assert_eq!(toc.bandwidth(), OpusBandwidth::Wide, "{why}");
-            assert_eq!(toc.bandwidth().nominal_rate_hz(), REQUESTED_SAMPLE_RATE_HZ, "{why}");
+            assert_eq!(
+                toc.bandwidth().nominal_rate_hz(),
+                REQUESTED_SAMPLE_RATE_HZ,
+                "{why}"
+            );
             assert_eq!(toc.frame_duration_us(), 20_000, "{why}");
             assert_eq!(toc.total_duration_us(), Some(20_000), "{why}");
             assert!(!toc.stereo, "{why}");
             assert_eq!(toc.channels() as u32, CHANNELS, "{why}");
-            assert_eq!(toc.frames, 1, "no captured packet carries more than one frame: {why}");
+            assert_eq!(
+                toc.frames, 1,
+                "no captured packet carries more than one frame: {why}"
+            );
             assert!(!toc.vbr, "{why}");
             // 20 ms at 16 kHz is 320 samples, i.e. 640 bytes of PCM16 mono per frame.
-            assert_eq!(toc.decoded_samples(REQUESTED_SAMPLE_RATE_HZ), Some(320), "{why}");
+            assert_eq!(
+                toc.decoded_samples(REQUESTED_SAMPLE_RATE_HZ),
+                Some(320),
+                "{why}"
+            );
 
             // The padding fields account for the fixed 40-byte length exactly. TOC (1) +
             // frame-count byte when code 3 (1) + padding-length byte when padded (1) + the
             // compressed frame + the padding == 40, with nothing unexplained.
             if toc.code == 3 {
                 let header = if toc.padding { 3 } else { 2 };
-                let pad = if toc.padding { frame.data[2] as usize } else { 0 };
+                let pad = if toc.padding {
+                    frame.data[2] as usize
+                } else {
+                    0
+                };
                 assert!(header + pad <= CAPTURED_PACKET_BYTES, "{why}");
                 let audio = CAPTURED_PACKET_BYTES - header - pad;
-                assert!(audio > 0, "the padding must not consume the whole packet: {why}");
                 assert!(
-                    frame.data[CAPTURED_PACKET_BYTES - pad..].iter().all(|b| *b == 0),
+                    audio > 0,
+                    "the padding must not consume the whole packet: {why}"
+                );
+                assert!(
+                    frame.data[CAPTURED_PACKET_BYTES - pad..]
+                        .iter()
+                        .all(|b| *b == 0),
                     "Opus padding is zero-filled — the trailing zeroes are padding, not \
                      silence and not truncation: {why}"
                 );
             } else {
-                assert_eq!(toc.code, 0, "only codes 0 and 3 appear in any capture: {why}");
+                assert_eq!(
+                    toc.code, 0,
+                    "only codes 0 and 3 appear in any capture: {why}"
+                );
             }
         }
     }
@@ -519,7 +549,10 @@ mod tests {
             match events.as_slice() {
                 [VoiceEvent::Packet(p)] => {
                     assert_eq!(p.index, i as u64, "{why}");
-                    assert_eq!(p.payload, frame.data, "the payload reaches the shell verbatim");
+                    assert_eq!(
+                        p.payload, frame.data,
+                        "the payload reaches the shell verbatim"
+                    );
                     assert!(p.toc.is_some(), "{why}");
                 }
                 other => panic!("{why}: {other:?}"),
@@ -535,14 +568,20 @@ mod tests {
         let mut v = VoiceStream::new();
         let frame = decode_device(&hex(GOLDEN_VOICE[0].0)).expect("decodes");
         let events = v.handle(&frame);
-        assert!(matches!(
-            events.as_slice(),
-            [VoiceEvent::StartedRecovered, VoiceEvent::Packet(_)]
-        ), "{events:?}");
+        assert!(
+            matches!(
+                events.as_slice(),
+                [VoiceEvent::StartedRecovered, VoiceEvent::Packet(_)]
+            ),
+            "{events:?}"
+        );
         assert!(v.is_capturing());
         // The recovery happens once; the next frame is just a packet.
         let events = v.handle(&frame);
-        assert!(matches!(events.as_slice(), [VoiceEvent::Packet(p)] if p.index == 1), "{events:?}");
+        assert!(
+            matches!(events.as_slice(), [VoiceEvent::Packet(p)] if p.index == 1),
+            "{events:?}"
+        );
     }
 
     /// The behaviour both reference implementations are missing. `0x99` is never sent, so a capture that is only
@@ -550,7 +589,11 @@ mod tests {
     /// each close it here and each say which one it was.
     #[test]
     fn every_way_a_capture_can_end_produces_an_end_event() {
-        for cause in [EndCause::Interrupted, EndCause::IdleTimeout, EndCause::Disconnected] {
+        for cause in [
+            EndCause::Interrupted,
+            EndCause::IdleTimeout,
+            EndCause::Disconnected,
+        ] {
             let mut v = VoiceStream::new();
             let start = decode_device(&hex(GOLDEN_START)).expect("decodes");
             v.handle(&start);
@@ -566,7 +609,10 @@ mod tests {
     #[test]
     fn a_device_signalled_end_is_handled_but_marked_as_never_observed() {
         use crate::Evidence;
-        assert_eq!(DeviceUpload::VoiceUploadEnd.evidence(), Evidence::ClientOnly);
+        assert_eq!(
+            DeviceUpload::VoiceUploadEnd.evidence(),
+            Evidence::ClientOnly
+        );
         assert_eq!(DeviceUpload::VoiceData.evidence(), Evidence::Capture);
         assert_eq!(DeviceUpload::VoiceUploadStart.evidence(), Evidence::Capture);
 
@@ -574,7 +620,10 @@ mod tests {
         v.handle_upload(DeviceUpload::VoiceUploadStart.code(), &[0x01]);
         let end = encode_device(DeviceUpload::VoiceUploadEnd.code(), &[]);
         let frame = decode_device(&end).expect("decodes");
-        assert_eq!(v.handle(&frame), vec![VoiceEvent::Ended(EndCause::DeviceSignalled)]);
+        assert_eq!(
+            v.handle(&frame),
+            vec![VoiceEvent::Ended(EndCause::DeviceSignalled)]
+        );
         assert!(!v.is_capturing());
     }
 
@@ -603,7 +652,10 @@ mod tests {
         assert_eq!(v.handle(&start), vec![VoiceEvent::Started]);
         assert_eq!(v.packets_in_capture(), 0);
         let events = v.handle(&voice);
-        assert!(matches!(events.as_slice(), [VoiceEvent::Packet(p)] if p.index == 0), "{events:?}");
+        assert!(
+            matches!(events.as_slice(), [VoiceEvent::Packet(p)] if p.index == 0),
+            "{events:?}"
+        );
     }
 
     /// Frames that are not part of the voice stream are reported as ignored rather than
@@ -611,11 +663,18 @@ mod tests {
     #[test]
     fn non_voice_frames_are_ignored() {
         let mut v = VoiceStream::new();
-        for h in ["ac55000453013185", "ac550006950000040ba4", "ac55000442000f51"] {
+        for h in [
+            "ac55000453013185",
+            "ac550006950000040ba4",
+            "ac55000442000f51",
+        ] {
             let frame = decode_device(&hex(h)).expect("decodes");
             assert_eq!(v.handle(&frame), vec![VoiceEvent::Ignored], "{h}");
         }
-        assert!(!v.is_capturing(), "an unrelated frame must not open a capture");
+        assert!(
+            !v.is_capturing(),
+            "an unrelated frame must not open a capture"
+        );
     }
 
     /// The file stream reuses `0x97` and `0x99` for entirely different things. Pinned as a test
@@ -623,9 +682,16 @@ mod tests {
     #[test]
     fn the_voice_opcodes_collide_with_the_file_opcodes_by_value() {
         use crate::reassembly::FileOpcode;
-        assert_eq!(DeviceUpload::VoiceUploadStart.code(), FileOpcode::Info.code());
+        assert_eq!(
+            DeviceUpload::VoiceUploadStart.code(),
+            FileOpcode::Info.code()
+        );
         assert_eq!(DeviceUpload::VoiceUploadEnd.code(), FileOpcode::End.code());
-        assert_eq!(DeviceUpload::from_code(FileOpcode::Data.code()), None, "0x98 is file-only");
+        assert_eq!(
+            DeviceUpload::from_code(FileOpcode::Data.code()),
+            None,
+            "0x98 is file-only"
+        );
     }
 
     /// An empty `0x46` is not a packet. Never captured — every one carries 40 bytes — but the

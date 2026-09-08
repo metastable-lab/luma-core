@@ -8,18 +8,31 @@
 
 /* Begin PBXBuildFile section */
 		2CB1EF88F327E18568131D28 /* LumaCore in Frameworks */ = {isa = PBXBuildFile; productRef = 8096018EF366F1DB6C1F93E8 /* LumaCore */; };
+		343809973434DD09AAD11731 /* LiveStreamSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BC855E2FDC83B0636F26106 /* LiveStreamSession.swift */; };
 		3A4186E1CA6EC4CFF85CF3C8 /* GlassesLink.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F187E706039D7B1634B4148 /* GlassesLink.swift */; };
+		4FB7932DE3A3CE4233F40DAA /* GlassesWiFi.swift in Sources */ = {isa = PBXBuildFile; fileRef = E445C935C5EA9D62944D0E5C /* GlassesWiFi.swift */; };
 		5AEB89B0B8B5C9E9D013DE77 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD47439185FF00F16FB10342 /* ContentView.swift */; };
+		7611CCA06CF21141261362DF /* LiveAudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EB147C662669E13A45CDAEF /* LiveAudioPlayer.swift */; };
+		7D2A056E9D1544002F9E6CFA /* FileApiClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD7448A3C696E7A86EF59F5B /* FileApiClient.swift */; };
 		9024C381668257B61DE3021E /* LumaDemoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F7721C520E0C061C1F8EFCF /* LumaDemoApp.swift */; };
+		F2C13BC1DAFB41428FEFFC93 /* LiveScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67EAE21E726F0138EE4B2A1A /* LiveScreen.swift */; };
+		F346AB3EC1C09597200BB6FD /* GalleryScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = D63F515F722C3E4E7EDE0D5F /* GalleryScreen.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		2BC855E2FDC83B0636F26106 /* LiveStreamSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveStreamSession.swift; sourceTree = "<group>"; };
+		4C23CF3B0FDC874D06A83994 /* LumaDemo.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LumaDemo.entitlements; sourceTree = "<group>"; };
+		67EAE21E726F0138EE4B2A1A /* LiveScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveScreen.swift; sourceTree = "<group>"; };
 		6F187E706039D7B1634B4148 /* GlassesLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassesLink.swift; sourceTree = "<group>"; };
+		7EB147C662669E13A45CDAEF /* LiveAudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveAudioPlayer.swift; sourceTree = "<group>"; };
 		7F7721C520E0C061C1F8EFCF /* LumaDemoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LumaDemoApp.swift; sourceTree = "<group>"; };
 		AE4F840C1929BCDF818AA4C4 /* LumaCore */ = {isa = PBXFileReference; lastKnownFileType = folder; name = LumaCore; path = LumaCore; sourceTree = SOURCE_ROOT; };
+		BD7448A3C696E7A86EF59F5B /* FileApiClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileApiClient.swift; sourceTree = "<group>"; };
 		D32EBF4371206868A49D0082 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		D377D90EC1A12263D0ACFA3A /* LumaDemo.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = LumaDemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D63F515F722C3E4E7EDE0D5F /* GalleryScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GalleryScreen.swift; sourceTree = "<group>"; };
 		DD47439185FF00F16FB10342 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		E445C935C5EA9D62944D0E5C /* GlassesWiFi.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassesWiFi.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -46,8 +59,15 @@
 			isa = PBXGroup;
 			children = (
 				DD47439185FF00F16FB10342 /* ContentView.swift */,
+				BD7448A3C696E7A86EF59F5B /* FileApiClient.swift */,
+				D63F515F722C3E4E7EDE0D5F /* GalleryScreen.swift */,
 				6F187E706039D7B1634B4148 /* GlassesLink.swift */,
+				E445C935C5EA9D62944D0E5C /* GlassesWiFi.swift */,
 				D32EBF4371206868A49D0082 /* Info.plist */,
+				7EB147C662669E13A45CDAEF /* LiveAudioPlayer.swift */,
+				67EAE21E726F0138EE4B2A1A /* LiveScreen.swift */,
+				2BC855E2FDC83B0636F26106 /* LiveStreamSession.swift */,
+				4C23CF3B0FDC874D06A83994 /* LumaDemo.entitlements */,
 				7F7721C520E0C061C1F8EFCF /* LumaDemoApp.swift */,
 			);
 			path = LumaDemo;
@@ -134,7 +154,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				5AEB89B0B8B5C9E9D013DE77 /* ContentView.swift in Sources */,
+				7D2A056E9D1544002F9E6CFA /* FileApiClient.swift in Sources */,
+				F346AB3EC1C09597200BB6FD /* GalleryScreen.swift in Sources */,
 				3A4186E1CA6EC4CFF85CF3C8 /* GlassesLink.swift in Sources */,
+				4FB7932DE3A3CE4233F40DAA /* GlassesWiFi.swift in Sources */,
+				7611CCA06CF21141261362DF /* LiveAudioPlayer.swift in Sources */,
+				F2C13BC1DAFB41428FEFFC93 /* LiveScreen.swift in Sources */,
+				343809973434DD09AAD11731 /* LiveStreamSession.swift in Sources */,
 				9024C381668257B61DE3021E /* LumaDemoApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -147,6 +173,7 @@
 			buildSettings = {
 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = LumaDemo/LumaDemo.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = LumaDemo/Info.plist;
@@ -168,6 +195,7 @@
 			buildSettings = {
 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = LumaDemo/LumaDemo.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = LumaDemo/Info.plist;

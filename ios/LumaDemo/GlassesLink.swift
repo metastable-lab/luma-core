@@ -42,6 +42,15 @@ final class GlassesLink: NSObject, ObservableObject {
     @Published private(set) var status = LinkStatus()
     @Published private(set) var isScanning = false
 
+    /// The SSID from the most recent `.wifiCredentials` event (`0x25`), or nil if the glasses
+    /// have not announced one since it was last cleared. The two Wi-Fi screens clear it
+    /// before they write `0x39`/`0x67`, so they can never join yesterday's network.
+    @Published private(set) var wifiSSID: String?
+
+    /// Every parsed event, as it arrives. The Gallery and Live screens subscribe rather than
+    /// reach for a peripheral, which keeps this the single CoreBluetooth owner.
+    let events = PassthroughSubject<FfiGlassesEvent, Never>()
+
     /// The one place the GATT topology is read. Short 16-bit UUIDs — `CBUUID` expands them
     /// against the SIG base itself, so no string surgery is needed here.
     private let gatt = glassesGatt()
@@ -103,6 +112,66 @@ final class GlassesLink: NSObject, ObservableObject {
     func takePhoto() { send("takePhoto", glassesTakePhoto(forAi: false)) }
     func interruptVoice() { send("interruptVoice", glassesInterruptVoice()) }
 
+    // MARK: - What the Wi-Fi screens need
+
+    /// Forget the last announced SSID. Call this immediately BEFORE writing `0x39`/`0x67`:
+    /// the glasses re-announce on every open, and joining a stale name is a twenty-second
+    /// wait that ends in "unreachable".
+    func clearWifiSSID() { wifiSSID = nil }
+
+    /// Write a frame and wait for the ATT write to be acknowledged.
+    ///
+    /// `AA13` takes a Write REQUEST, so CoreBluetooth calls back once per write, in order —
+    /// the continuations are a plain FIFO. Returns as soon as the radio has the frame; it
+    /// says nothing about what the glasses will do with it, which is what the event stream
+    /// is for. Never throws: a demo screen reports "not connected" in its own status line
+    /// rather than unwinding a whole flow.
+    func write(_ name: String, _ frame: Data) async {
+        guard let p = peripheral, let c = writeCharacteristic else {
+            note("not connected — dropped \(name)")
+            return
+        }
+        let type: CBCharacteristicWriteType = gatt.writeWithResponse ? .withResponse : .withoutResponse
+        append(.out, "\(name)  \(hex(frame))")
+        guard type == .withResponse else {
+            p.writeValue(frame, for: c, type: type)
+            return
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            writeWaiters.append(continuation)
+            p.writeValue(frame, for: c, type: type)
+        }
+    }
+
+    /// Wait for the glasses to push their SSID (`0x25`), which arrives about
+    /// `glassesTimingSsidArrivalMs()` after the open. The timeout is generous because the
+    /// image processor has to power up first, and a slow one is not a broken one.
+    func awaitSSID(timeout: TimeInterval = 15) async -> String? {
+        if let ssid = wifiSSID, !ssid.isEmpty { return ssid }
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if Task.isCancelled { return nil }
+            try? await Task.sleep(for: .milliseconds(200))
+            if let ssid = wifiSSID, !ssid.isEmpty { return ssid }
+        }
+        return nil
+    }
+
+    /// Resumed in `didWriteValueFor`. FIFO, because `AA13` writes are acknowledged in the
+    /// order they were issued.
+    private var writeWaiters: [CheckedContinuation<Void, Never>] = []
+
+    private func completeWrite() {
+        guard !writeWaiters.isEmpty else { return }
+        writeWaiters.removeFirst().resume()
+    }
+
+    private func failAllWrites() {
+        let waiting = writeWaiters
+        writeWaiters.removeAll()
+        waiting.forEach { $0.resume() }
+    }
+
     /// The connect interrogation. `getSwitchStates` (`0x48`) is the interesting one: the
     /// firmware answers with a TEN-FRAME BURST keyed by each setting's own setter opcode and
     /// never with a `0x48` frame, so a client that waits for one waits forever. The parser
@@ -139,6 +208,7 @@ final class GlassesLink: NSObject, ObservableObject {
         for event in parser.push(chunk: data) {
             apply(event)
             append(.incoming, describe(event))
+            events.send(event)
         }
         if parser.switchStates().isComplete { status.settingsComplete = true }
     }
@@ -153,6 +223,10 @@ final class GlassesLink: NSObject, ObservableObject {
             status.firmware = "bt \(v.btMajor).\(v.btMinor).\(v.btPatch) · isp \(v.ispMajor).\(v.ispMinor).\(v.ispPatch) · hw \(v.hardware)"
         case let .identity(project, customer):
             status.project = "\(project) / \(customer)"
+        case let .wifiCredentials(ssid, _):
+            // The passphrase half of this event is fixed and already in the crate
+            // (`glassesWifiPassphrase()`); only the SSID changes per device.
+            wifiSSID = ssid
         default:
             break
         }
@@ -226,6 +300,9 @@ extension GlassesLink: CBCentralManagerDelegate {
             self.writeCharacteristic = nil
             // A half-frame from the dead link would otherwise prefix the next one.
             self.parsers.removeAll()
+            // Anything still awaiting a write ack will never get one now.
+            self.failAllWrites()
+            self.wifiSSID = nil
             self.status = LinkStatus()
             self.note("disconnected\(message.map { ": \($0)" } ?? "")")
         }
@@ -281,9 +358,12 @@ extension GlassesLink: CBPeripheralDelegate {
         didWriteValueFor characteristic: CBCharacteristic,
         error: Error?
     ) {
-        guard let error else { return }
-        let message = error.localizedDescription
-        Task { @MainActor in self.note("write failed: \(message)") }
+        let message = error?.localizedDescription
+        Task { @MainActor in
+            if let message { self.note("write failed: \(message)") }
+            // Resume either way: a failed write must not strand a screen awaiting its ack.
+            self.completeWrite()
+        }
     }
 }
 

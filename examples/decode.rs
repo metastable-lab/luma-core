@@ -14,10 +14,10 @@ use luma_core::parser::{Parser, SwitchStates};
 
 /// Real frames, concatenated. Every one of these is a golden vector in `src/frame.rs`.
 const CONNECT_BLOB: &str = concat!(
-    "ac550006950000040ba4",       // capability push, ~30 ms after link-up
-    "ac550009550104080103010269", // versions: bt V1.4.8 / isp V1.3.1 / hw V2
-    "ac55000a645431000030333033af", // project "T1", customer "0303"
-    "ac550005173a300182",         // battery 100 %, charging (ASCII, '9'+1 = 0x3A)
+    "ac550006950000040ba4",             // capability push, ~30 ms after link-up
+    "ac550009550104080103010269",       // versions: bt V1.4.8 / isp V1.3.1 / hw V2
+    "ac55000a645431000030333033af",     // project "T1", customer "0303"
+    "ac550005173a300182",               // battery 100 %, charging (ASCII, '9'+1 = 0x3A)
     "ac55000c450000000000000000000045", // action sync — TEN bytes
     // the 0x48 switch-state burst: ten frames, and not a 0x48 among them
     "ac550003013132",
@@ -72,6 +72,9 @@ fn main() {
     println!("  complete          {}", states.is_complete());
 
     if !parser.buffered().is_empty() {
-        println!("\n{} bytes left buffered (a partial frame)", parser.buffered().len());
+        println!(
+            "\n{} bytes left buffered (a partial frame)",
+            parser.buffered().len()
+        );
     }
 }

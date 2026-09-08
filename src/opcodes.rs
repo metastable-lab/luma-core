@@ -572,7 +572,9 @@ impl GestureAction {
         } else {
             byte
         };
-        GestureAction::ALL.into_iter().find(|a| a.ordinal() == ordinal)
+        GestureAction::ALL
+            .into_iter()
+            .find(|a| a.ordinal() == ordinal)
     }
 }
 
@@ -669,10 +671,9 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                0x01, 0x02, 0x04, 0x06, 0x07, 0x08, 0x09, 0x10, 0x11, 0x14, 0x17, 0x22, 0x23,
-                0x24, 0x30, 0x31, 0x32, 0x33, 0x34, 0x36, 0x37, 0x39, 0x40, 0x44, 0x45, 0x48,
-                0x55, 0x56, 0x57, 0x59, 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x67, 0x69, 0x70,
-                0x71, 0x95,
+                0x01, 0x02, 0x04, 0x06, 0x07, 0x08, 0x09, 0x10, 0x11, 0x14, 0x17, 0x22, 0x23, 0x24,
+                0x30, 0x31, 0x32, 0x33, 0x34, 0x36, 0x37, 0x39, 0x40, 0x44, 0x45, 0x48, 0x55, 0x56,
+                0x57, 0x59, 0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x67, 0x69, 0x70, 0x71, 0x95,
             ]
         );
         // No duplicate discriminants — two names on one byte would make `from_code` pick
@@ -744,7 +745,10 @@ mod tests {
     /// corrupt binding as "volume down" and the user would see a plausible lie.
     #[test]
     fn gesture_action_decodes_ascii_and_raw_but_never_clamps() {
-        assert_eq!(GestureAction::from_value(b'2'), Some(GestureAction::PlayPause));
+        assert_eq!(
+            GestureAction::from_value(b'2'),
+            Some(GestureAction::PlayPause)
+        );
         assert_eq!(GestureAction::from_value(2), Some(GestureAction::PlayPause));
         assert_eq!(GestureAction::PlayPause.ascii(), 0x32);
         assert_eq!(GestureAction::from_value(b'5'), None);
@@ -771,7 +775,10 @@ mod tests {
     /// volume READ reply looks exactly like a volume read REQUEST on the byte alone.
     #[test]
     fn zero_x45_and_zero_x69_are_deliberately_shared_across_directions() {
-        assert_eq!(AppCommand::GetDeviceStatus.code(), DeviceUpload::ActionSync.code());
+        assert_eq!(
+            AppCommand::GetDeviceStatus.code(),
+            DeviceUpload::ActionSync.code()
+        );
         assert_eq!(AppCommand::GetVolumes.code(), DeviceUpload::Volumes.code());
         let shared: Vec<u8> = AppCommand::ALL
             .iter()
@@ -797,14 +804,20 @@ mod tests {
         // Probed against hardware, absent from every capture. `PullImage` acks and delivers
         // nothing; `PullThumbnailStatus` is silent. Neither is Capture.
         assert_eq!(AppCommand::PullImage.evidence(), Evidence::DeviceProbe);
-        assert_eq!(AppCommand::PullThumbnailStatus.evidence(), Evidence::DeviceProbe);
+        assert_eq!(
+            AppCommand::PullThumbnailStatus.evidence(),
+            Evidence::DeviceProbe
+        );
         // The twelve Android-missing opcodes are not speculative — ten of them are on the
         // wire, which is why the gap is a real regression rather than an unused surface.
         assert_eq!(AppCommand::GetCapabilities.evidence(), Evidence::Capture);
         assert_eq!(AppCommand::OpenWifiLive.evidence(), Evidence::Capture);
         assert_eq!(AppCommand::SetVolume.evidence(), Evidence::Capture);
         // A session that waits for 0x99 hangs; the level says so.
-        assert_eq!(DeviceUpload::VoiceUploadEnd.evidence(), Evidence::ClientOnly);
+        assert_eq!(
+            DeviceUpload::VoiceUploadEnd.evidence(),
+            Evidence::ClientOnly
+        );
         assert_eq!(DeviceUpload::VoiceData.evidence(), Evidence::Capture);
     }
 
@@ -813,8 +826,14 @@ mod tests {
     #[test]
     fn the_evidence_census_matches_the_documented_counts() {
         let count = |want: Evidence| {
-            AppCommand::ALL.iter().filter(|c| c.evidence() == want).count()
-                + DeviceUpload::ALL.iter().filter(|u| u.evidence() == want).count()
+            AppCommand::ALL
+                .iter()
+                .filter(|c| c.evidence() == want)
+                .count()
+                + DeviceUpload::ALL
+                    .iter()
+                    .filter(|u| u.evidence() == want)
+                    .count()
         };
         assert_eq!(count(Evidence::Capture), 39);
         assert_eq!(count(Evidence::DeviceProbe), 2);

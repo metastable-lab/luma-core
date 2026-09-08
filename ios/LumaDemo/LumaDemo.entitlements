@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Programmatically join the access point the glasses raise for the file API and the
+	     live stream (PROTOCOL.md §12). Without this entitlement NEHotspotConfiguration
+	     fails at runtime with an "unconfigured" error and the user has to join the network
+	     by hand in Settings — which still works, so the two Wi-Fi screens degrade rather
+	     than break.
+
+	     This capability must also be enabled on the App ID in the developer portal, or
+	     signing fails with a provisioning-profile mismatch. The Simulator has no hotspot
+	     API at all: these screens only do anything on a physical iPhone. -->
+	<key>com.apple.developer.networking.HotspotConfiguration</key>
+	<true/>
+</dict>
+</plist>

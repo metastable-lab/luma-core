@@ -47,6 +47,12 @@ targets:
         PRODUCT_NAME: "LumaDemo"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: LumaDemo/Info.plist
+        # Hotspot Configuration, so the app can join the access point the glasses raise for
+        # the file API and the live stream (PROTOCOL.md §12). The capability must ALSO be
+        # enabled on the App ID in the developer portal, or signing fails on a
+        # provisioning-profile mismatch. Without the entitlement the app still runs: the
+        # join simply fails and the user joins the network from Settings instead.
+        CODE_SIGN_ENTITLEMENTS: LumaDemo/LumaDemo.entitlements
         ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: YES
         # The Simulator is supported so the UI compiles and can be inspected without a
         # device. It has no Bluetooth radio, so a real connection still needs a phone.
@@ -66,6 +72,13 @@ targets:
         NSBluetoothAlwaysUsageDescription: >-
           This demo connects to smart glasses over Bluetooth to read their state and
           send protocol commands.
+        # Required for the Gallery and Live screens: both talk to 192.168.169.1 on the
+        # glasses' own access point, and iOS treats every one of those connections as
+        # local-network access. Without this key the first request is refused and the
+        # screens look like a failed Wi-Fi join.
+        NSLocalNetworkUsageDescription: >-
+          This demo browses files on the glasses and shows their live camera view over
+          the glasses' own Wi-Fi network.
     dependencies:
       - package: LumaCore
         product: LumaCore

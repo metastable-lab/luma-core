@@ -22,6 +22,8 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>This demo connects to smart glasses over Bluetooth to read their state and send protocol commands.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>This demo browses files on the glasses and shows their live camera view over the glasses' own Wi-Fi network.</string>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

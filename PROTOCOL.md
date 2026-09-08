@@ -1,347 +1,341 @@
-# Smart-glasses protocol — reverse-engineered reference
+# Luma Glasses — BLE Protocol Reference
 
-Everything here is **device-confirmed** from BLE packet captures, Wi-Fi packet
-captures, and the vendor apps' own uploaded debug logs. It supersedes the
-vendor's own interaction spec (三端交互协议 v07 — a proprietary PDF, not
-included here) wherever the two disagree, and they disagree a lot.
+The wire protocol between a phone (or any BLE central) and Luma smart glasses, as
+implemented by [`luma-core`](README.md). This document is the human-readable half; the
+crate is the executable half, and §20 maps one onto the other.
 
-Hardware under test: an `E09` unit, project `T1` / customer `0303`
-(`equipmentCode T10303`), bt **V1.4.8** / isp **V1.3.1** / hw **V2**.
+**Verified against:** E09 hardware, project `T1` / customer `0303`, firmware
+**bt 1.4.8 / isp 1.3.1 / hw 2**. Other firmware may differ; the statuses below tell you
+how much to trust each row.
 
-Two vendor apps drive this same firmware and were captured side by side:
-**EyeVue** 3.2.7 and **GlassX** 3.0.8. Both are skins on the Watchfun
-platform (`WF_DanHaiBLEManager`, `SdkCode: neomix`), which is why they share
-opcodes but differ in which ones they bother to send.
-
-Captures are referred to by name throughout — `eyevue_1`…`eyevue_4`,
-`glassx_1`, `client_1`…`client_3`. The `eyevue_*`/`glassx_*` traces are the two
-vendor apps driving the hardware; the `client_*` traces are the reference client
-this crate was extracted from driving the same unit. The captures themselves are
-not distributed; the golden vectors in `src/frame.rs`, `src/reassembly.rs` and
-`src/voice.rs` carry the bytes that matter, verbatim.
-
----
-
-## 1. How to capture this yourself
-
-Three channels, in ascending order of effort and descending order of yield.
-
-**The vendor apps' own debug logs.** This is the single highest-value channel
-and it is not packet capture. Both vendor apps record every BLE frame in both
-directions **with the app's own decoded interpretation**, then upload the whole
-log to object storage and announce its URL in a plaintext HTTP POST. That
-decoded interpretation is how `0x95`, `0x71` and `0x67` were identified — a raw
-capture shows you the bytes, the vendor's log tells you what the vendor calls
-them. The apps flush their log **on backgrounding**, so swipe the app away
-after each block of testing or nothing is written.
-
-**iOS — PacketLogger.** Install Apple's *Bluetooth* profile on the iPhone
-(`developer.apple.com/bug-reporting/profiles-and-logs/`, reboot after
-installing), reproduce, then pull the `.pklg` off the device with PacketLogger
-from Additional Tools for Xcode. This gives you HCI with ATT decoded, which is
-what every capture behind this document is. Read it with
-`tshark -r <capture>.pklg -Y btatt.value -T fields -e btatt.value`, or open it
-in Wireshark.
-
-**Android — btsnoop.** Enable *Developer options → Enable Bluetooth HCI snoop
-log*, restart the Bluetooth stack (or the phone), reproduce, then pull
-`/data/misc/bluetooth/logs/btsnoop_hci.log` via a bug report. Confirm the
-setting actually took before trusting a session — several OEM builds silently
-keep the old value until the stack restarts.
-
-For the Wi-Fi side (§8–§10) join the glasses' SoftAP from a laptop and capture
-in monitor mode, or run the HTTP calls yourself against `192.168.169.1` and
-capture on the laptop's own interface.
-
----
-
-## 2. GATT
+**Status legend, used throughout:**
 
 | | |
 |---|---|
-| service | `AA12` |
-| write (app → device) | `AA13`, Write **Request** (0x12, with response) |
-| control notify | `AA14` |
-| file/voice notify | `AA15` |
+| ✅ | Verified in real sessions with the glasses |
+| 🧪 | Probed directly against the hardware |
+| ⬜ | Defined by the platform, not yet exercised. Sendable, but expect nothing |
 
-`AE00`/`AE01`/`AE02` and the standard Battery service are present but **neither
-vendor app touches them**. Voice PCM and control replies both arrive on `AA14`
-on this firmware; `AA15` carries only the `52 58` file stream.
-
-Frames:
-
-```
-app → device   AB 55 | len(2, BE) | cmd | data… | crc
-device → app   AC 55 | len(2, BE) | cmd | data… | crc
-len = 1 (cmd) + N (data) + 1 (crc)
-crc = (cmd + Σ data) & 0xFF
-```
-
-A command with no payload carries a single `0x00` filler byte. Frames are
-both fragmented across notifications and coalesced several-per-notification —
-the receiver must be a streaming demuxer, not one-frame-per-packet.
+**Conventions.** Every multi-byte integer on this wire is **big-endian**. Settings
+values are ASCII digits (`0x30` = `'0'`, `0x31` = `'1'`) except the record duration,
+which is a 2-byte integer. Media and call commands use raw `0x00`/`0x01`. The phone time
+is plain hex, not BCD. Numbers are not consistently encoded across commands, and the
+decoders follow each field rather than a family rule.
 
 ---
 
-## 3. Command table
+## 1. Transport
 
-Opcodes marked ★ are **absent from the v07 PDF** — its app→device list stops
-at `0x65`.
+One GATT service, one write characteristic, two notify characteristics.
 
-### App → device
-
-| cmd | name | data | notes |
-|---|---|---|---|
-| `0x01` | setLED | `30`/`31`/`32` | low/mid/high. **No off value exists** — see §3a. Not exposed in the app |
-| `0x02` | setRecordDuration | 2 B BE seconds | `00 5A`=90 s, `00 B4`=180 s. GlassX offers 1/3/5/7/10 min |
-| `0x04` | wearDetection | `30`/`31` | |
-| `0x06` | voiceCommand | `30`/`31` | |
-| `0x07`–`0x11` ★ | gesture bindings | ASCII digit | see §5 |
-| `0x14` | factoryReset | `00` | |
-| `0x17` | getBattery | `00` | reply `<tens><ones><charging>`, digits are `0x30+n` — at 100 % it sends `3A 30` |
-| `0x22` | takePhoto | `30` photo, `31` photo **+ HD image for AI** | |
-| `0x23` / `0x24` | start / stop video | `00` | |
-| `0x30` | switchMusic | `00` prev, `01` next | |
-| `0x31` | playPause | `00` pause, `01` play | |
-| `0x32` | volume | `00` down, `01` up | relative |
-| `0x33` | answerHangup | `00` hang up, `01` answer | |
-| `0x34` | voiceRecording | `00` stop, `01` start | |
-| `0x39` | **openWiFi: gallery** | `30` AP, `31` p2p | brings up the SoftAP for the **file API** |
-| `0x40` | getFileCount | `00` | replies via `0x42`, never echoes `0x40` |
-| `0x44` | fileDownloadComplete | `30 00` all done / `30 01` ISP off only / `31 <n>` partial | teardown for **both** Wi-Fi modes |
-| `0x45` | getDeviceStatus | `00` | reply = action-sync, §4 |
-| `0x48` | getSwitchStates | `00` | reply is a **burst**, §5 |
-| `0x55` | getVersions | `00` | `bt(3) isp(3) hw(1)` |
-| `0x56` | interruptVoice | `00` | **the only thing that closes the mic**, §6 |
-| `0x57` | retransmitVoice | `00` | never observed |
-| `0x59` | sendPhoneTime | `YY MM DD HH MM SS` (hex, not BCD) | |
-| `0x60` | reboot | `00` | never observed |
-| `0x61` | orientation | `30` portrait, `31` landscape | |
-| `0x62` | offlineVoiceLang | `00` zh, `01` en | never observed on the wire |
-| `0x63` | enterUpgrade | `30` ap, `31` p2p | never observed |
-| `0x64` | getProjectName | `00` | 8 B: 4 project + 4 customer ASCII |
-| `0x65` | sendISPVersion | 3 B | never observed |
-| `0x67` ★ | **openWiFi: live** | `30` AP, `31` p2p | brings up the SoftAP for **RTSP**, §8 |
-| `0x69` ★ | getVolumes | `00` | reply `[system, media, call]` |
-| `0x70` ★ | setVolume | `<channel> <level>` | channel `00` system / `01` media / `02` call |
-| `0x71` ★ | getVoiceDisableState | `00` | 1-byte bitmap, §7 |
-| `0x95` ★ | getCapabilities | `00` | 4-byte BE bitmap, §7 |
-
-### 3a. `0x01` LED — dead on arrival
-
-Chased through the vendor **Android** APK (decompiled with jadx) after neither
-iOS app was ever seen sending it. The result is conclusive
-enough to drop the feature:
-
-* `z39.java` (`SendCommandViaBle`) implements `setLedBrightness(int)` →
-  `configSendCommand(1, i)`, which builds `AB 55 00 03 01 <v> <crc>`. So the
-  opcode is real and the frame shape is confirmed.
-* **It has zero callers.** Two grep hits in 17,989 decompiled files: the
-  declaration and its abstract in `w34.java`. Nothing invokes it, and there is
-  no reflection path.
-* **No LED level constants.** `yf1.java` (`Command`) holds the app's constant
-  table; its `48/49/50` runs all belong to gestures and camera direction. There
-  is no LED triple and no fourth value anywhere.
-* **No LED UI.** `GlassesSettingsFragment` enumerates its entire menu:
-  `DEVICE_INFO, OTA, QUICK_VOLUME, LIVE, CAMERA_DIRECTION, VIDEO_LENGTH`.
-* **The app does not even parse it on receive** — `ModBleResponse`'s cmd switch
-  has no `case 1:`, so the `0x01` frame inside the `0x48` burst is dropped.
-* **No LED bit in the `0x95` capability word** (`ck2.java` enumerates all 13).
-* The only light strings in the whole resource table (all locales) are pairing
-  copy about the **指示灯 / indicator light**. No 补光 / 手电 / torch / fill-light
-  vocabulary exists, and there is no camera-flash opcode.
-
-Conclusion: the LED is a firmware-driven **status indicator**, `0x01` only
-retunes its brightness, and no vendor client has ever driven it. The encoder would happily emit any byte, so a fourth value
-can only be ruled in or out by probing the hardware — not from any client.
-
-### Device → app
-
-| cmd | name | notes |
+| | UUID | Notes |
 |---|---|---|
-| `0x25` | wifiName | NUL-terminated SSID; password is the fixed `12345678` |
-| `0x42` | thumbnailCount | 2 B BE |
-| `0x45` | actionSync | §4 |
-| `0x46` | voiceData | PCM, ~50/s |
-| `0x49` | abandonVoice | never observed |
-| `0x51` | cancelAIBroadcast | never observed |
-| `0x52` | hdImageFailed | never observed |
-| `0x53` | chargeBattery | `<charging> <percent>`; pushed ~10 s discharging / ~60 s charging |
-| `0x96` | ispUpgradeDone | never observed |
-| `0x97` | voiceUploadStart | |
-| `0x99` | voiceUploadEnd | **never sent by this firmware** — do not wait for it |
+| service | `AA12` | advertise-filter on this to find the glasses |
+| write, app → glasses | `AA13` | ATT **Write Request** (with response). Every write is acknowledged |
+| control notify | `AA14` | all command replies, pushes and the voice stream |
+| file notify | `AA15` | the `52 58` file stream only (§15) |
 
-Most setters are echoed back verbatim by the device as an ack.
+`AE00`, `AE01`, `AE02` and the standard Battery service (`180F`) are also present and are
+not used by this protocol.
 
----
+Subscribe to **both** notify characteristics before sending anything. The glasses push a
+capabilities frame (§8) about 30 ms after the link comes up, before the app has written a
+byte.
 
-## 4. `0x45` action sync — 10 bytes
+Use a write *with* response. A write-without-response is a different ATT opcode that the
+glasses never acknowledge and gives you no flow control; on this firmware every write is
+answered.
 
-The PDF says 9 fields; the device sends 10. The vendor's own names
-(from its `收到设备动作同步状态` dictionary):
+## 2. Frame format
 
-| idx | name | confirmed by |
+```text
+app → glasses   AB 55 | len (2, BE) | cmd (1) | data (N) | crc (1)
+glasses → app   AC 55 | len (2, BE) | cmd (1) | data (N) | crc (1)
+
+len = 1 (cmd) + N (data) + 1 (crc)          a whole frame is 4 + len bytes
+crc = (cmd + Σ data) & 0xFF                 an additive checksum, not a polynomial CRC
+```
+
+A command with no payload carries one `0x00` filler byte, so the smallest frame is
+7 bytes and `len` is never below 3.
+
+```text
+get battery      AB 55 00 03 17 00 17
+battery reply    AC 55 00 05 17 3A 30 01 82      → 100 %, charging
+```
+
+`len` counts the command byte and the checksum but **not** the four header bytes; the
+checksum covers the command byte and the data but **not** the header or the length. Both
+boundaries are easy to get wrong in a way that only shows on non-trivial payloads.
+
+**Receive as a stream.** In practice every frame arrives whole in its own notification,
+but a receiver should still be a streaming demuxer: buffer, scan for the header, take
+complete frames, keep the remainder. `Parser` and `Deframer` in the crate do exactly this,
+so you can hand them notifications verbatim.
+
+Most setters are echoed back verbatim as the acknowledgement.
+
+## 3. Recommended connection sequence
+
+1. Connect, discover `AA12`, subscribe to `AA14` and `AA15`.
+2. Expect an unsolicited `0x95` capabilities push (§8).
+3. Read in this order: `0x55` versions, `0x64` project name, `0x17` battery, `0x45`
+   status, `0x48` switch states (a burst, §7), `0x69` volumes, `0x95` capabilities, `0x71`
+   voice-feature state.
+4. Send `0x59` phone time (§16).
+5. Thereafter: battery arrives on its own via `0x53` (§5), so a poll of `0x17` every
+   5–10 s is plenty; refresh `{0x45, 0x48, 0x69, 0x95}` every ~30 s or on demand.
+
+## 4. Command reference
+
+### App → glasses
+
+| cmd | name | data | status | see |
+|---|---|---|---|---|
+| `0x01` | set LED brightness | `30`/`31`/`32` low/mid/high | ✅ | §18 — status indicator only, no off value |
+| `0x02` | set record duration | 2 B BE seconds (`00 5A` = 90 s) | ✅ | §9 |
+| `0x04` | wear detection | `30`/`31` | ✅ | §7 |
+| `0x06` | voice command (wake word) | `30`/`31` | ✅ | §7 |
+| `0x07`–`0x11` | gesture bindings, one slot each | ASCII digit | ✅ | §7 |
+| `0x14` | factory reset | `00` | ⬜ | §16 |
+| `0x17` | get battery | `00` | ✅ | §5 |
+| `0x22` | take photo | `30` photo, `31` photo + AI image | ✅ | §9, §15 |
+| `0x23` / `0x24` | start / stop video | `00` | ✅ | §9 |
+| `0x30` | switch track | `00` previous, `01` next | ✅ | §11 |
+| `0x31` | play / pause | `00` pause, `01` play | ✅ | §11 |
+| `0x32` | volume step | `00` down, `01` up | ✅ | §11 — SYSTEM channel only |
+| `0x33` | call | `00` hang up, `01` answer | ✅ | §11 |
+| `0x34` | voice recording | `00` stop, `01` start | ✅ | §10 |
+| `0x39` | open Wi-Fi for the file API | `30` AP, `31` P2P | ✅ | §12, §13 |
+| `0x40` | get file count | `00` | ✅ | §9 — replies as `0x42` |
+| `0x44` | Wi-Fi done / tear down | `30 00` all, `30 01` ISP off only, `31 <n>` partial | ✅ | §12 |
+| `0x45` | get device status | `00` | ✅ | §6 |
+| `0x48` | get all switch states | `00` | ✅ | §7 — replies as a burst |
+| `0x55` | get versions | `00` | ✅ | §5 |
+| `0x56` | interrupt voice | `00` | ✅ | §10 — the only way to close the mic |
+| `0x57` | retransmit voice | `00` | ⬜ | §10 |
+| `0x59` | send phone time | `YY MM DD HH MM SS`, hex | ✅ | §16 |
+| `0x60` | reboot | `00` | ⬜ | §16 |
+| `0x61` | camera orientation | `30` portrait, `31` landscape | ✅ | §9 |
+| `0x62` | offline voice language | `00` zh, `01` en | ⬜ | §7 |
+| `0x63` | enter firmware upgrade | `30` AP, `31` P2P | ⬜ | §16 |
+| `0x64` | get project name | `00` | ✅ | §5 |
+| `0x65` | send ISP version | 3 B | ⬜ | §16 |
+| `0x67` | open Wi-Fi for live view | `30` AP, `31` P2P | ✅ | §12, §14 |
+| `0x69` | get volumes | `00` | ✅ | §11 |
+| `0x70` | set volume | `<channel> <level>` | ✅ | §11 |
+| `0x71` | get voice-feature state | `00` | ✅ | §8 |
+| `0x95` | get capabilities | `00` | ✅ | §8 |
+
+### Glasses → app
+
+| cmd | name | payload | status | see |
+|---|---|---|---|---|
+| `0x25` | Wi-Fi network name | NUL-terminated SSID | ✅ | §12 |
+| `0x42` | file count | 2 B BE | ✅ | §9 |
+| `0x45` | status (action sync) | 10 flags | ✅ | §6 |
+| `0x46` | voice data | one Opus packet | ✅ | §10 |
+| `0x49` | voice abandoned | | ⬜ | §10 |
+| `0x51` | AI broadcast cancelled | | ⬜ | |
+| `0x52` | HD image failed | | ⬜ | §15 |
+| `0x53` | battery push | `<charging> <percent>` raw | ✅ | §5 |
+| `0x96` | ISP upgrade done | | ⬜ | §16 |
+| `0x97` | voice stream start | | ✅ | §10 |
+| `0x99` | voice stream end | | ⬜ | §10 — never sent by this firmware |
+
+Plus the echo of every setter, and the per-setting frames of the `0x48` burst (§7).
+
+## 5. Device information
+
+**`0x55` versions** → 7 bytes: `bt(3) isp(3) hw(1)`, e.g. `01 04 08 01 03 01 02` =
+bt 1.4.8, isp 1.3.1, hw 2.
+
+**`0x64` project name** → 8 ASCII bytes: 4 project + 4 customer (`T1` / `0303`).
+
+**`0x17` battery** → `<tens> <ones> <charging>` where the digits are ASCII (`0x30 + n`).
+At 100 % the tens digit overflows to `0x3A`; the crate decodes that as 100 rather than
+freezing at 99. `charging` is raw `0x00`/`0x01`.
+
+**`0x53` battery push** → `<charging> <percent>`, both raw bytes. Sent unsolicited
+roughly every 10 s while discharging and every 60 s while charging. Note the two battery
+messages use different encodings for the same quantity.
+
+## 6. Device status — `0x45`
+
+The reply carries **ten** one-byte flags:
+
+| idx | flag | fires when |
 |---|---|---|
-| 0 | `takePhoto` | photo capture |
-| 1 | `audioRecord` | `0x34` |
-| 2 | `videoRecord` | `0x23`/`0x24` |
-| 3 | `volumeUp` | touchpad swipe (capture `eyevue_3`) |
-| 4 | `volumeDown` | touchpad swipe (capture `eyevue_3`) |
-| 5 | `nutationHead` (nod) | never fired |
-| 6 | `shakeHead` | never fired |
+| 0 | `takePhoto` | a photo is being captured |
+| 1 | `audioRecord` | voice recording (`0x34`) is active |
+| 2 | `videoRecord` | video (`0x23`) is active |
+| 3 | `volumeUp` | touchpad swipe |
+| 4 | `volumeDown` | touchpad swipe |
+| 5 | `nod` | never observed to fire |
+| 6 | `shakeHead` | never observed to fire |
 | 7 | `playPause` | single tap |
-| 8 | `wearingDetection` | never fired |
-| 9 | `importingMode` | goes 1 while a Wi-Fi session is open |
+| 8 | `wearingDetection` | never observed to fire |
+| 9 | `importingMode` | a Wi-Fi session is open (§12) |
 
-Index 9 is **not** "Wi-Fi active" — the vendor calls it file-import mode.
+Index 9 means "file-import mode", which is how the glasses describe having their Wi-Fi up.
 
----
+## 7. Settings and the switch-state read — `0x48`
 
-## 5. `0x48` switch states — a burst, not a frame
+Each setting has its own setter (`0x01`, `0x02`, `0x04`, `0x06`, `0x07`–`0x11`, `0x61`),
+echoed back as the acknowledgement.
 
-The firmware does **not** answer `0x48` with an `AC 55 … 48 …` frame. It
-emits one frame **per setting**, keyed by that setting's own setter opcode,
-in the order the PDF §19 enumerates them:
+**Reading them all with `0x48` returns a burst, not a single frame.** The glasses answer
+with one frame *per setting*, keyed by that setting's own setter opcode, in this order:
 
+```text
+AC 55 00 03 01 31        LED brightness    '1'
+AC 55 00 04 02 00 3C     record seconds    0x003C   ← 2-byte integer, not ASCII
+AC 55 00 03 04 31        wear detection    '1'
+AC 55 00 03 06 31        voice command     '1'
+AC 55 00 03 07 30        gesture slot      ┐
+AC 55 00 03 08 31        gesture slot      │
+AC 55 00 03 09 32        gesture slot      │  five slots
+AC 55 00 03 10 34        gesture slot      │
+AC 55 00 03 11 33        gesture slot      ┘
+AC 55 00 03 61 30        orientation       '0'
 ```
-ac 55 00 03 01 31      LED           = '1'
-ac 55 00 04 02 00 3c   record secs   = 0x003C  ← 2-byte BE, NOT ASCII
-ac 55 00 03 04 31      wear detect   = '1'
-ac 55 00 03 06 31      voice command = '1'
-ac 55 00 03 07 30      gesture slot  ┐
-ac 55 00 03 08 31      gesture slot  │ PDF §19 item 5, 滑条手势
-ac 55 00 03 09 32      gesture slot  │ (five slots)
-ac 55 00 03 10 34      gesture slot  │
-ac 55 00 03 11 33      gesture slot  ┘
-ac 55 00 03 61 30      orientation   = '0'
-```
 
-Every value is an ASCII digit except `0x02`.
+There is **no `0x48` reply frame**; a client that waits for one waits forever. The crate's
+`SwitchStates` accumulator collects the burst and reports when all ten have landed.
 
-**Gesture slots — strong hypothesis, not yet proven.** The five values are
-`0 1 2 4 3` on every capture, which matches the factory default printed on
-p.2 of the PDF exactly (swipe-fwd = vol−, swipe-back = vol+, single tap =
-play/pause, double tap = prev, triple tap = next):
+**Gesture slots.** Slot ids `0x07`–`0x11` are decimal-looking (7–11), not hex 16/17. The
+value is the bound action:
 
-| slot | gesture | value → action |
+| slot | gesture | default value → action |
 |---|---|---|
-| `0x07` | swipe forward | `0` vol− |
-| `0x08` | swipe back | `1` vol+ |
-| `0x09` | single tap | `2` play/pause |
-| `0x10` | double tap | `4` prev |
-| `0x11` | triple tap | `3` next |
+| `0x07` | swipe forward | `0` volume down |
+| `0x08` | swipe back | `1` volume up |
+| `0x09` | single tap | `2` play / pause |
+| `0x10` | double tap | `4` previous track |
+| `0x11` | triple tap | `3` next track |
 
-**To confirm:** change ONE gesture binding in the vendor app and see which
-slot moves. No capture has done this yet.
+The slot-to-gesture assignment matches the factory defaults; it has not been confirmed by
+rebinding a gesture and watching which slot changes (§19).
 
-Note `0x10`/`0x11` are decimal-looking ids (slots 7–11), not hex 16/17.
+`0x62` offline voice language is never reported in the burst.
 
-Spec §19 item 7 (offline voice language) is **never reported** by this
-firmware.
+## 8. Capabilities — `0x95` — and voice-feature state — `0x71`
 
----
+Both are bitmaps.
 
-## 6. Voice — the mic never closes on its own
+**`0x95`** → 4 bytes big-endian. Observed value `00 00 04 0B`. The flags it expands to are:
+`aiAwaken`, `offlineVoice`, `debounce`, `debounceDynamic`, `photoMode`,
+`photoModeDynamic`, `factoryDataReset`, `voiceAdjust`, `languageSwitchDynamic`,
+`waterMask`, `live`, `wearingDetection`, `wearingDetectionDynamic`. On the verified unit
+`photoModeDynamic`, `voiceAdjust`, `live` and `wearingDetectionDynamic` are true. The
+bit-to-flag assignment is not yet pinned (§19), so the crate exposes the raw word.
 
-Measured across every capture with voice in it:
+The glasses push `0x95` unsolicited about 30 ms after every link-up.
 
-| capture | 0x46 frames | gaps > 1.2 s | app sent 0x56 |
-|---|---|---|---|
-| eyevue_1 | 1,338 | none (26.7 s solid) | yes, at the end |
-| eyevue_2 | 6,062 | 2, **each starting exactly at a 0x56** | yes ×3 |
-| `client_1` | 3,982 | **none** (79.7 s solid) | **never** |
-| `client_2` | 3,254 | **none** (65.1 s solid) | **never** |
+**`0x71`** → 1 byte: which voice features are *disabled* (`aiAwaken`, `offlineVoice`).
+Only `0x00` has been observed, so bit positions are unknown; the crate exposes the raw
+byte. `0x95` and `0x71` are a pair: what the glasses can do versus what is switched off.
 
-The device never stops streaming and never sends `0x99`. **An app-written
-`0x56` is the only thing that closes the mic.** The vendor's own open-mic
-windows are 24.6 s and 29.6 s, and it writes `0x56` in **pairs** ~0.5 s apart.
+## 9. Camera
 
-Our `GlassesPacketParser.voiceStreamCap` (30 s) is calibrated to match.
-
----
-
-## 7. `0x95` capabilities and `0x71` voice-disable
-
-Both are bitmaps the app expands into named flags. The vendor logs
-`payload大端序` (payload, big-endian) then dumps the map.
-
-### `0x95` — 4 bytes big-endian
-
-Observed value on this unit: `00 00 04 0B` (bits 0, 1, 3, 10 set).
-
-```
-supportAiAwaken = 0                supportOfflineVoice = 0
-supportDebounce = 0                supportPhotoMode = 0
-supportDebounceDynamic = 0         supportPhotoModeDynamic = 1
-supportFactoryDataReset = 0        supportVoiceAdjust = 1
-supportLanguageSwitchDynamic = 0   supportWaterMask = 0
-supportLive = 1                    supportWearingDetection = 0
-                                   supportWearingDetectionDynamic = 1
-```
-
-Four bits set, four flags true — but the map prints alphabetically, so the
-**bit↔flag assignment is not pinned**. Needs a second unit with different
-capabilities, or a firmware where a flag changes.
-
-GlassX renders the same word as a UI layout:
-`capability layout voice=true live=true photo=false cards=["voiceAdjust","live","videoDuration"]`.
-
-The device also **pushes `0x95` unsolicited ~30 ms after every LE link-up**,
-before the app writes anything (the CCCD persists across the bond).
-
-### `0x71` — 1 byte
-
-```
-获取设备语音指令禁用状态stateMap：{ aiAwaken = 0; offlineVoice = 0; }
-```
-
-Which voice features are **disabled**. Only ever observed as `0x00`, so
-bit positions are unknown. Sent in the connect/refresh group between `0x48`
-and `0x55`.
-
-`0x95` and `0x71` are a pair: what the device *can* do vs what is *switched off*.
-
-### Not to be confused with the backend profile
-
-`getInfoByDeviceCode` returns a much larger, server-side feature set
-(`supportAi`, `supportTranslation`, `supportVideoTranslation`,
-`supportSimultaneousInterpretation`, `supportVoiceNote`, `supportCloseLive`,
-`supportLiveHorizontal`, `useInstructionCode: "video-00004"` …). That is an
-app-feature profile, **not** the device bitmap.
-
----
-
-## 8. Wi-Fi — two modes, two opcodes
-
-Both `0x39` and `0x67` raise the **same** SoftAP (`DH-TwI-4641E4`, password
-fixed `12345678`), report the SSID via `0x25` ~2.5 s later, and are torn down
-with `0x44`. They differ in what the device serves:
-
-| opcode | serves |
+| | |
 |---|---|
-| `0x39` | the **file API** (§9) |
-| `0x67` | the **RTSP live stream** (§10) |
+| `0x22 30` | take a photo. Saved to the `EVENT` folder (§13) |
+| `0x22 31` | take a photo **and** push a small copy over BLE for AI use (§15) |
+| `0x23` / `0x24` | start / stop a video clip, saved to `LOOP` |
+| `0x02` | clip length in seconds, 2 B BE. 60, 90, 180, 300, 420 and 600 are all in use |
+| `0x61` | orientation, `30` portrait / `31` landscape |
+| `0x40` → `0x42` | number of files waiting, 2 B BE. The reply comes as `0x42`; `0x40` is never echoed |
 
-GlassX sends `0x67` and never `0x39` when entering live mode; the gallery
-path sends `0x39` and never `0x67`. The app waits ~2 s after the SSID arrives
-before attempting the join (`T系列连接设备WiFi前延时2秒`) — the device needs
-that long to actually raise the AP.
+Full-resolution photos (~300–400 KB) and videos only leave the glasses over Wi-Fi (§13).
 
-The phone gets `192.168.169.100` by DHCP; the device is **`192.168.169.1`**.
-Neither of the PDF's addresses (`192.168.1.254`, `192.168.49.207`) is used by
-this firmware.
+## 10. Voice
 
-**The join is genuinely flaky, for the vendor too.** Both apps log repeated
-`NEHotspotConfiguration` retries, 25 s timeouts, and iOS bouncing back to the
-original SSID (`检测到系统回连原始WiFi`). GlassX ships "temporarily turn off
-cellular data" as user-facing advice.
+Two independent things share the name.
 
----
+**Voice recording (`0x34`)** starts and stops an on-device recording that lands in the
+`AAC` folder (§13). Nothing streams to the phone.
 
-## 9. File API — JSON REST, not the PDF's CGI
+**The wake-word stream** is what a voice assistant uses. When the on-device wake word
+fires (or `0x06` voice command is enabled and triggered), the glasses send:
 
-The PDF §3 documents a Novatek `?custom=1&cmd=NNNN` CGI API. **This firmware
-does not implement it.** It serves:
+```text
+AC 55 … 97 …          stream start
+AC 55 … 46 <40 B>     one Opus packet, about 50 per second, on AA14
+AC 55 … 46 <40 B>
+…
+```
+
+Each `0x46` payload is one complete **Opus** packet: SILK mode, wideband, one 20 ms
+frame, mono. Request 16 kHz output from your decoder. The crate parses the packet header
+(`OpusToc`) and hands you the packet plus its geometry; decoding to PCM is a platform
+codec (CoreAudio on iOS, `MediaCodec` on Android, libopus elsewhere).
+
+**The stream does not end on its own.** `0x99` (stream end) is defined but this firmware
+never sends it; the glasses keep streaming for as long as the link is up. The microphone
+closes **only** when the app writes `0x56`. So the client owns two timers, and must write
+`0x56` unconditionally when either fires:
+
+| timer | value that works |
+|---|---|
+| idle gap: no `0x46` for this long means the user stopped talking | ~1.2 s |
+| hard cap on one capture | ~25–30 s |
+
+Writing `0x56` twice ~0.5 s apart is harmless and is what shipping clients do.
+
+`0x57` retransmit and `0x49` voice-abandoned are defined and unexercised.
+
+## 11. Audio, media and calls
+
+| | |
+|---|---|
+| `0x30` | previous (`00`) / next (`01`) track |
+| `0x31` | pause (`00`) / play (`01`) |
+| `0x33` | hang up (`00`) / answer (`01`) |
+| `0x69` | get volumes → 3 raw bytes `[system, media, call]`, observed range `0x05`…`0x10` |
+| `0x70` | set volume `<channel> <level>`, channel `00` system / `01` media / `02` call |
+| `0x32` | volume step down (`00`) / up (`01`) |
+
+**`0x32` only moves the SYSTEM channel.** The glasses' own touchpad swipes move MEDIA.
+For music playback use `0x70` with an explicit channel; relative steps are the wrong
+control. Volume levels are a raw scale carried verbatim; the crate does not normalise
+them.
+
+Note the encodings: settings use ASCII digits, media and call commands use raw `0`/`1`.
+`voice_command(on)` sends `0x31`; `play_pause(play)` sends `0x01`. The builders in the
+crate get this right so you do not have to.
+
+## 12. Wi-Fi
+
+The glasses raise their own access point on demand. Two commands bring up the **same**
+network and differ only in what the glasses serve on it:
+
+| command | serves |
+|---|---|
+| `0x39` | the file API (§13) |
+| `0x67` | the RTSP live stream (§14) |
+
+Sequence:
+
+1. Write `0x39 30` or `0x67 30` (AP mode; `31` selects P2P, which is untested).
+2. The glasses acknowledge, then push `0x25` with the SSID (e.g. `DH-TwI-4641E4`) about
+   2.5 s later. The passphrase is fixed: **`12345678`**.
+3. Wait **~2 s after the SSID arrives** before joining; the AP is not ready sooner.
+4. Join. The glasses are **`192.168.169.1`**; the phone gets `192.168.169.100` by DHCP.
+5. Do the work (§13 or §14).
+6. Write `0x44` to tear down: `30 00` all done, `30 01` power off the image processor
+   only, or `31 <n>` after a partial download. Then drop the network so the phone returns
+   to its normal Wi-Fi.
+
+While the AP is up, `0x45` flag 9 (`importingMode`) reads 1.
+
+**The join is flaky by nature.** Expect retries and 25 s timeouts from the OS, and iOS
+occasionally bouncing back to the previous network. Telling the user to switch off
+cellular data for the duration helps on iOS.
+
+## 13. File API (over Wi-Fi, after `0x39`)
+
+A small JSON-over-HTTP API on `http://192.168.169.1`:
 
 | | |
 |---|---|
@@ -360,258 +354,155 @@ does not implement it.** It serves:
   {"folder":"EMR","files":[],"count":0}]}
 ```
 
-Four fixed folders: **EVENT** photos, **AAC** voice recordings, **LOOP**
-video, **EMR** emergency (always empty so far). `name` already carries the
-folder prefix. Delete replies `{"result":0,"info":"success."}`.
+Four fixed folders: **EVENT** photos, **AAC** voice recordings, **LOOP** video clips,
+**EMR** emergency (always empty so far). `name` already carries the folder prefix. Delete
+replies `{"result":0,"info":"success."}`. Files are timestamped in their names; the
+glasses keep their own clock from `0x59` (§16).
 
-> **`size` is in KiB, not bytes.** `size:378` downloaded as 387,972 bytes.
-> Across six samples `size == floor(bytes / 1024)` exactly. A byte-for-byte
-> truncation check against `size` rejects every download.
+> **`size` is in KiB, not bytes.** `size: 378` downloads as 387,972 bytes; in every sample
+> `size == floor(bytes / 1024)`. A byte-exact truncation check against `size` rejects every
+> download.
 
-The vendor's sync order: flush leftover deletes from the previous session →
-`getfilelist` → all thumbnails → then per file, download followed by its
-delete, pipelined one behind. It never sets date or time over HTTP.
+A sync loop that works: list → fetch thumbnails → for each file, download then delete,
+pipelined one behind → `0x44 30 00`.
 
----
+## 14. Live view (over Wi-Fi, after `0x67`)
 
-## 10. Live mode — RTSP / H.264
+Connect straight to RTSP; there is no HTTP handshake and no BLE traffic in between.
 
-After `0x67` and the AP join, the app connects straight to RTSP. There is no
-HTTP handshake and no BLE traffic in between.
-
-```
-rtsp://192.168.169.1:554/h264
-Server: Hisilicon RTSP Streaming Media Server/1.0.0
-
+```text
+rtsp://192.168.169.1:554/h264          Server: Hisilicon RTSP Streaming Media Server/1.0.0
 OPTIONS → DESCRIBE → SETUP track0 → PLAY
 
-m=video 0 RTP/AVP 96
-  a=rtpmap:96 H264/90000
-  a=decode_buf=300
-  a=control:track0
-m=audio 0 RTP/AVP 97
-  a=rtpmap:97 mpeg4-generic/16000/1
-  a=fmtp:97 profile-level-id=1; mode=AAC-hbr; config=1408;
-            sizeLength=13; indexlength=3; indexdeltalength=3
-  a=control:track1
-
-Transport: RTP/AVP;unicast;client_port=8712-8713;server_port=53796-53797
+m=video 0 RTP/AVP 96      a=rtpmap:96 H264/90000       a=control:track0
+m=audio 0 RTP/AVP 97      a=rtpmap:97 mpeg4-generic/16000/1
+                          a=fmtp:97 profile-level-id=1; mode=AAC-hbr; config=1408;
+                                    sizeLength=13; indexlength=3; indexdeltalength=3
+Transport: RTP/AVP;unicast;client_port=8712-8713
 ```
 
-* **H.264 Main profile, Level 5.2, 1600×1200.** SPS/PPS in-band via STAP-A,
-  slices via FU-A. SSRC `0x7B7A7978`, dynamic payload type 96.
-* Frame rate is **not** signalled in the SDP. Measured 25.3 fps @ 3.32 Mbps
-  on a clean link; 21.8 fps @ 2.14 Mbps with 35 % packet loss on a bad one.
-* **`track1` (AAC-LC 16 kHz mono) is advertised but never `SETUP` by either
-  vendor app** — their live view is silent. It can be requested (RFC 3640
-  AAC-hbr, `sizeLength=13 indexLength=3 indexDeltaLength=3`, `config=1408`)
-  as a best-effort extra, but a refused audio SETUP must never break video.
+- **H.264 Main profile, level 5.2, 1600×1200**, SPS/PPS in-band (STAP-A), slices as FU-A,
+  dynamic payload type 96.
+- Frame rate is not signalled. Measured ~25 fps at ~3.3 Mbps on a clean link.
+- The AAC-LC 16 kHz mono audio track is advertised and works when requested (RFC 3640
+  AAC-hbr); treat it as best-effort and never let a refused audio `SETUP` break video.
+- Use a hardware decoder (`VideoToolbox`, `MediaCodec`). A software decode of 1600×1200
+  drowns in jitter-buffer overruns.
 
-GlassX plays it with FFmpeg (`User-Agent: Lavf60.3.100`) and a **software**
-H.264 decoder, swscale `YUVJ420P → NV12`, into an `AVSampleBufferDisplayLayer`
-sized 420×315. Its logs are wall-to-wall `jitter buffer full` /
-`RTP: missed N packets`. VideoToolbox hardware decode is an easy win here.
+## 15. The AI image — `52 58` file stream on `AA15`
 
----
+After `0x22 31`, the glasses push a small JPEG (~11 KB) over BLE using a **second
+framing** on the file characteristic:
 
-## 11. AI vision — the image rides BLE
+```text
+info   52 58 | len (2, BE) | 97 | total (4 BE) type (1) | crc | 58 52
+data   52 58 | len (2, BE) | 98 | addr  (4 BE) bytes…   | crc | 58 52
+end    52 58 | len (2, BE) | 99 | 00                    | crc | 58 52
 
-The photo for "what am I looking at" does **not** go over Wi-Fi. Full chain,
-one real exchange:
-
-```
-← server  {"type":"transcribe","text":"我在看的东西是什么。","status":"recognized"}
-← server  {"type":"visual_qa","query":"我在看的东西是什么","content":"visual_qa"}
-→ BLE     ab 55 0003 22 31 53         cmd 0x22 data 0x31 = photo + HD image for AI
-← BLE     ac 55 0003 22 01 23         ack
-← BLE     52 58 0007 97 00002AD0 02 93 58 52
-            └ file-info: 10,960 B, type 0x02 = HD image
-← BLE     52 58 01F6 98 <addr(4,BE)> <496 B> <crc> 58 52   × 23 frames
-            addresses 0x000000 → 0x002AA0, step 496 B, last frame 48 B
-            22 × 496 + 48 = 10,960 ✓
-→ server  {"command":"identifyImage",
-           "base64Images":["data:image/jpeg;base64,/9j/4AAQ…"]}
-← server  {"type":"realtimeChat","text":"看起来你正在看一个放在地上的黑色小箱子…"}
+len = 1 (cmd) + payload + 1 (crc)      a whole frame is 4 + len + 2 bytes
+crc = (cmd + Σ payload) & 0xFF         the same additive checksum as §2
 ```
 
-**The server asks for the image, not the app.** The app advertises
-`isSupportPhoto:true` at session open; the backend decides the question needs
-vision and sends `visual_qa` down the same socket.
+A real transfer:
 
-The image is ~11 KB (not the ~300–400 KB the gallery downloads) and moves at
-~13.7 kB/s over BLE. End to end: **5.76 s** from recognised question to answer
-— 2.4 s capture, 0.8 s transfer, 2.3 s model.
+```text
+→ AB 55 00 03 22 31 53                        take photo + AI image
+← AC 55 00 03 22 01 23                        ack
+← 52 58 00 07 97 00 00 2A D0 02 93 58 52      info: 10,960 bytes, type 0x02 = HD image
+← 52 58 01 F6 98 <addr> <496 bytes> <crc> 58 52   × 23 frames, addresses 0x000000 → 0x002AA0
+```
 
-The `52 58` framing is PDF §4.2/§4.3 verbatim, and `src/reassembly.rs`
-implements it against three complete captured transfers.
+Chunks are 496 bytes with a shorter last one (22 × 496 + 48 = 10,960). Throughput is
+about 13.7 kB/s, so the image lands ~0.8 s after the ack; capture itself takes ~2.4 s.
+Note that these opcodes (`0x97`, `0x99`) collide by value with the voice-stream opcodes
+on `AA14`; the framing and the characteristic keep them apart. Feed `AA15` bytes to the
+crate's `FileReassembler` and wait for `FileEvent::Completed`.
 
----
+Full-resolution photos do **not** travel this way; use the file API (§13).
 
-## 12. Vendor cloud — out of scope
+## 16. Time and maintenance
 
-The vendor apps talk to a cloud assistant over their own WebSocket API, and the
-glasses themselves never do: every byte the device sends or receives is on the
-BLE and Wi-Fi links documented above. The endpoints, their auth and their
-payloads are therefore out of scope for this crate and are not reproduced here.
+**`0x59` phone time** → `YY MM DD HH MM SS` as plain hex bytes (`1A 07 1B 12 28 12` =
+2026-07-27 18:40:18). **Not BCD**: a BCD encoder sets the glasses' clock to a garbage
+date. The glasses date their media from this clock. Send it once per connection.
 
-## 13. Client guidance
+`0x14` factory reset, `0x60` reboot, `0x63` enter upgrade, `0x65` send ISP version and
+the `0x96` upgrade-done reply are defined and unexercised (⬜).
 
-Two findings that will bite a client if it does not know them. Both are
-device-confirmed, and neither is in the vendor PDF.
+## 17. Quirks and gotchas, collected
 
-**`0x32` only moves the SYSTEM channel.** Device-confirmed in capture
-`client_1`: seven `0x32` writes walked `0x69` index 0 and left media untouched,
-while the glasses' own touchpad moves MEDIA (capture `eyevue_3`). Neither vendor
-app sends `0x32` at all. Relative volume buttons are therefore the wrong control
-for music playback — use `0x70` with an explicit channel.
+- `0x48` never answers with a `0x48` frame; it answers with ten per-setting frames (§7).
+- The wake-word stream never ends by itself; `0x56` from the app is the only close (§10).
+- `0x40` is never echoed; the count comes as `0x42` (§9).
+- `0x17` battery is ASCII digits and overflows to `0x3A` at 100 %; `0x53` is raw (§5).
+- `0x02` record duration is a 2-byte integer inside a burst of ASCII digits (§7).
+- `0x59` is hex, not BCD (§16).
+- `0x32` moves only the system volume (§11).
+- File-API `size` is KiB (§13).
+- Wait ~2 s after the SSID before joining the AP (§12).
+- Voice packets and control replies share `AA14`; the file stream is alone on `AA15` (§1).
+- Every multi-byte field is big-endian (conventions, above).
 
-**`0x56` is the only thing that closes the mic.** `0x99` (voice-upload-end) is
-declared by the PDF and by both reference implementations and is **never sent by
-this firmware**: four captures totalling 14,636 `0x46` voice frames contain zero
-of them, and two of those captures streamed for 79.7 s and 65.1 s solid. A
-client that waits for `0x99` to close a capture waits forever. The mic closes
-when the app writes `0x56`, and at no other time — so the client owns both the
-idle timeout and the hard cap, and must write `0x56` unconditionally on the
-runaway path. See §6.
+## 18. Reserved and non-functional commands
 
-Two smaller notes for anyone sizing a poll loop: the vendor apps poll
-`{0x45, 0x17, 0x55, 0x95, 0x48, 0x69}` about every 10 s, and the indicator LED
-(`0x01`, §3a) is not worth exposing — it is a firmware-driven status light and
-no vendor client has ever driven it.
+**`0x01` LED brightness** controls the brightness of the firmware-driven status indicator.
+There is no off value, no torch and no flash; nothing user-facing is gained by exposing it.
 
-## 13a. Opcodes named by the Android APK, not yet seen on the wire
+**Defined by the platform, never seen to do anything:** `0x03` microphone, `0x16`
+capacity, `0x35` camera style, `0x36`/`0x37` image pull, `0x43` gesture recover, `0x50`
+camera mode. The crate lists them in `VENDOR_NAMED_UNIMPLEMENTED` and deliberately does
+**not** give them `AppCommand` variants, so they cannot be sent by accident.
 
-`z39.java` enumerates the vendor SDK's full app→device surface. It independently
-confirms several of the findings above — **`103` = `0x67` is labelled *live***,
-`149` = `0x95` is the support bitmap, `112` = `0x70` volume, `72` = `0x48`
-device status — and names six commands no capture has produced:
+**`0x36` image pull (🧪).** The firmware recognises it and replies within ~30 ms with an
+echo of the index byte, for any index including out-of-range ones, and then sends **no
+data**. `0x37` gets no reply at all. There is no BLE path to a full-resolution photo on
+this firmware; use Wi-Fi.
 
-| cmd | vendor name |
-|---|---|
-| `0x03` | microphone |
-| `0x16` | capacity |
-| `0x35` | camera style |
-| `0x36` / `0x37` | image pull |
-| `0x43` | gesture recover |
-| `0x50` | camera mode |
+If you probe an unknown opcode yourself: log inbound frames while you do it, vary the
+payload (a reply that tracks the payload is an echo, not a status), and send a bogus
+opcode such as `0xEE` as a control so you know what "unrecognised" looks like on the unit
+in front of you. Silence in your own log is not silence on the wire.
 
-None are implemented here. Listed so a future session does not re-derive them.
+## 19. Open questions
 
-### 13b. `0x36` image pull — dispatched, acks, never delivers
+- Gesture slot ↔ gesture assignment (§7): confirm by rebinding one gesture.
+- `0x95` and `0x71` bit positions (§8): needs a unit with different capabilities, or a
+  voice feature switched off.
+- The ⬜ rows in §4.
 
-**Device-tested 2026-07-28.** `0x36` is real: the firmware recognises it and
-replies in ~30 ms with an echo of the byte sent.
+## 20. Where each part lives in the crate
 
-| sent | reply | note |
+| section | module | types and functions |
 |---|---|---|
-| `0x36` index 0 | `AC 55 00 03 36 00 36` | echo `00` |
-| `0x36` index 1 | `AC 55 00 03 36 01 37` | echo `01` |
-| `0x36` index 2 | `AC 55 00 03 36 02 38` | echo `02` |
-| `0x36` index 5 | `AC 55 00 03 36 05 3B` | echo `05` — **no range check** |
-| `0x37` index 0 | *(silence)* | unimplemented |
-| `0xEE`, `0xDE` (bogus control) | *(silence)* | echo is not a default path |
+| §1 transport | `gatt` | `SERVICE`, `WRITE`, `CONTROL_NOTIFY`, `FILE_NOTIFY`, `NOTIFY_ALL`, `WRITE_WITH_RESPONSE`, `PRESENT_BUT_UNUSED`, `is_drivable` |
+| §2 frame format | `frame` | `encode`, `encode_command`, `decode_device`, `checksum`, `Frame`, `DecodeError`, `Deframer`, `Residual` |
+| §4 command table | `opcodes` | `AppCommand`, `DeviceUpload`, `Evidence`, `VENDOR_NAMED_UNIMPLEMENTED` |
+| §4 builders | `commands` | one function per row: `take_photo`, `set_volume`, `send_phone_time`, `get_switch_states`, … |
+| §5 device info | `parser` | `Versions`, `Identity`, `BatteryReading`, `BatterySource` |
+| §6 status | `parser` | `ActionSync`, `DeviceAction` |
+| §7 settings | `parser`, `opcodes` | `SwitchStates`, `SwitchReport`, `GestureSlot`, `GestureAction`, `Orientation`, `SWITCH_STATE_BURST_ORDER` |
+| §8 capabilities | `parser` | `Capabilities`, `VoiceFeatures` |
+| §9 camera | `commands`, `parser` | `take_photo`, `start_video`, `set_record_duration`, `MediaCount` |
+| §10 voice | `voice` | `VoiceStream`, `VoicePacket`, `VoiceEvent`, `EndCause`, `OpusToc` |
+| §11 audio | `commands`, `parser` | `set_volume`, `VolumeChannel`, `Volumes` |
+| §12 Wi-Fi | `commands`, `parser` | `open_wifi`, `WifiService`, `WifiCredentials` (`ssid`, `passphrase()`), `file_download_complete` |
+| §15 file stream | `reassembly` | `FileReassembler`, `FileEvent`, `ReassembledFile`, `FileKind`, `decode_file_frame` |
+| all inbound | `parser` | `Parser::push(bytes) -> Vec<DeviceEvent>` |
+| other languages | `ffi` (feature `uniffi`) | `GlassesParser`, `GlassesDeframer`, `GlassesFileReassembler`, `GlassesVoiceStream`, `GlassesSwitchStates`, the `glasses_*` functions |
 
-Three facts, each separately established:
+### Beyond the sans-IO core
 
-1. **The reply echoes the index**, it is not a status code — the byte tracks
-   whatever is sent.
-2. **No data ever follows.** Zero `52 58` frames across four indices and 25 s
-   of window, with AA15 confirmed subscribed (`setNotifyValue(true)` fires for
-   both AA14 and AA15 at discovery), so this is a real negative.
-3. **The echo is meaningful.** The `0xEE`/`0xDE` control proves the firmware
-   drops commands it doesn't know; `0x36` is dispatched, `0x37` is not.
+The core makes decisions and does arithmetic; it opens no socket, holds no radio and reads
+no clock. The parts that need I/O are in the same repository, behind feature flags, so a
+laptop can run the whole protocol with nothing else:
 
-**Verdict: the ack exists, the data path doesn't.** `appPullImage` is wired
-into the dispatcher but delivers no image on this firmware, and it doesn't
-validate the index — so a caller cannot even tell a valid index from a bogus
-one. **Wi-Fi sync remains the only route to a full-resolution photo.** Do not
-build a BLE image-pull path on this opcode without new evidence.
-
-Not ruled out: an unmet precondition (camera mode, or a required preceding
-command) could gate the data path. Nothing in the vendor SDK suggests one, and
-the vendor's own app has zero callers for `0x36`, so this was not pursued.
-
-To probe the next unknown opcode, reproduce the method:
-
-1. **Arm inbound logging first**, for a short window around the write. A probe
-   harness that logs every inbound frame permanently puts work on the
-   per-packet path, which is the one place this protocol cannot afford it — so
-   arm it, probe, disarm.
-2. Send the opcode with `encode_command` (or `glasses_encode` for a byte
-   with no `AppCommand` variant), **varying the payload**. A reply that tracks
-   the payload is an echo, not a status.
-3. **Always run a bogus-opcode control** (`0xEE`/`0xDE`). Without it you
-   cannot tell "firmware recognises this" from "firmware echoes everything",
-   and that distinction is the whole result above.
-
-### 13b-1. Why the first probe read "dead" — methodology note
-
-`0x36` was sent to real hardware on 2026-07-28 as `AB 55 00 03 36 00 39`
-(twice). The syslog showed the two TX lines and no reply.
-
-**That result is not evidence.** Inbound frames were only being logged behind a
-diagnostic flag that was not set, and an unrecognised reply command fell through
-the client's dispatch switch silently — so "no log line" could equally mean the
-device answered and nobody printed it. Do not record `0x36` as dead the way
-`0x01` (LED, §3a) is: the LED verdict rests on the APK teardown, not on log
-silence.
-
-Arming inbound logging fixed this, and the very first re-run showed a reply that
-had been arriving all along. **The lesson generalises: on this wire, absence of a
-log line is not absence of a frame.** Before recording any opcode as dead,
-confirm inbound logging is armed, and run a bogus-opcode control so you know
-what silence and acknowledgement each look like on the device in front of you.
-
-Note the contrast with `0x01` (LED, §3a), which *is* dead: that verdict rests
-on the APK teardown, not on log silence.
-
-## 14. Still open
-
-* Gesture slot ↔ gesture mapping (§5) — change one binding in the vendor app.
-* `0x95` and `0x71` bit positions (§7) — need a unit with different flags, or
-  a voice feature switched off.
-* `0x62`, `0x57`, `0x60`, `0x63`, `0x65`, `0x14`, `0x49`, `0x51`, `0x52`,
-  `0x96` — defined but never observed on the wire.
-
----
-
-## 15. Where each part lives in the crate
-
-| spec | module | the types and functions |
+| | sans-IO (default build) | with I/O |
 |---|---|---|
-| §2 GATT | `gatt` | `SERVICE`, `WRITE`, `CONTROL_NOTIFY`, `FILE_NOTIFY`, `WRITE_WITH_RESPONSE`, `PRESENT_BUT_UNUSED`, `is_drivable` |
-| §2 frame envelope | `frame` | `encode`, `encode_command`, `encode_device`, `decode_app`, `decode_device`, `checksum`, `Frame`, `DecodeError` |
-| §2 streaming demuxer | `frame` | `Deframer`, `drain`, `Residual`, `is_partial_frame_prefix`, `MAX_LENGTH_FIELD` |
-| §3 command table | `opcodes` | `AppCommand`, `DeviceUpload`, `Evidence`, `VENDOR_NAMED_UNIMPLEMENTED` |
-| §3 app → device builders | `commands` | one function per row — `take_photo`, `set_volume`, `send_phone_time`, `get_switch_states`, … |
-| §3a `0x01` LED | `commands`, `opcodes` | `LedLevel`, `set_led` — the encoder emits it; §3a says why nothing should |
-| §4 `0x45` action sync | `parser` | `ActionSync`, `DeviceAction`, `DeviceEvent::ActionSync` — **ten** flags |
-| §5 `0x48` switch burst | `parser` | `SwitchStates`, `SwitchReport`, `GestureSlot`, `GestureAction`, `SWITCH_STATE_BURST_ORDER` |
-| §6 voice | `voice` | `VoiceStream`, `VoicePacket`, `VoiceEvent`, `EndCause`, `OpusToc`, `OpusMode`, `OpusBandwidth` |
-| §7 `0x95` / `0x71` | `parser` | `Capabilities`, `VoiceFeatures`, `DeviceEvent::Capabilities` |
-| §8 Wi-Fi opcodes | `commands`, `parser` | `open_wifi`, `WifiService`, `WifiCredentials` (SSID from `0x25`, fixed passphrase) |
-| §11 `52 58` file stream | `reassembly` | `FileReassembler`, `FileEvent`, `FileKind`, `FileOpcode`, `decode_file_frame`, `encode_file_frame`, `TransferProgress` |
-| everything inbound | `parser` | `Parser::push` → `Vec<DeviceEvent>`; `parse` for a single frame |
-| any language | `ffi` (feature `uniffi`) | `GlassesParser`, `GlassesDeframer`, `GlassesFileReassembler`, `GlassesVoiceStream`, `GlassesSwitchStates`, `glasses_*` free functions |
+| BLE (§1) | `gatt`, `frame`, `parser`, `commands` | feature `ble`: `client::ble::Glasses` (btleplug), `examples/luma.rs` |
+| file API (§13) | `fileapi`: URLs, listing and reply parsers, the KiB rule, `SyncPlan` | feature `wifi-client`: `client::fileapi::FileClient` (ureq), `examples/gallery.rs`, `python/gallery.py` |
+| live view (§14) | `rtsp`, `sdp`, `rtp`, `h264`, `aac` | `examples/live.rs` (std sockets), the iOS demo's live screen |
+| voice decode (§10) | `voice`: packet framing and Opus headers | feature `opus`: `client::opus::VoiceDecoder` + WAV writer |
+| durations | `timing`: every recommended value as a constant | your timers |
 
-### Not in this crate, by design
-
-This is a sans-IO byte layer. It makes decisions and does arithmetic; it opens
-no socket, holds no radio and reads no clock. So these documented parts of the
-protocol are deliberately absent, and each is the client's:
-
-* **The SoftAP join** (§8). Picking up the `0x25` SSID and joining
-  `192.168.169.1` is `NEHotspotConfiguration` / `WifiNetworkSpecifier` work.
-* **The JSON file API** (§9). `/app/getfilelist`, thumbnail and full-file
-  download are plain HTTP against the glasses' AP — a REST client, not a codec.
-* **RTSP and H.264** (§10). The RTSP message layer is pure enough to port, but
-  the socket, the RTP jitter buffer and the decoder are not.
-* **Opus decode** (§6). This crate hands you the packet and its geometry —
-  frame count, sample rate, bandwidth, duration in µs — parsed from the TOC
-  byte. Turning those bytes into PCM is a platform codec (CoreAudio,
-  `MediaCodec`, libopus).
-* **Every timing duration.** The ~2 s wait after an SSID arrives before joining
-  the AP, the ~1.2 s voice-idle gap, the 30 s open-mic cap, the poll interval,
-  the reconnect ladder. This crate can NAME the moment a timer expires
-  (`EndCause::IdleTimeout`) and cannot measure one.
-* **The vendor cloud** (§12), which the glasses never talk to at all.
+The Wi-Fi *join* is the one step that stays platform-specific; the [guide](docs/GUIDE.md)
+gives the call for each OS.

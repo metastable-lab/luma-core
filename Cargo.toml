@@ -28,6 +28,26 @@ crate-type = ["lib", "staticlib", "cdylib"]
 # floor. See the `bindgen` feature below.
 uniffi = { version = "0.32", default-features = false, optional = true }
 
+# Everything below is OPTIONAL and off by default. They exist so a laptop can drive the
+# glasses end to end without an app — the sans-IO half of the crate stays dependency-free and
+# every one of these sits behind a feature that names what it does.
+
+# `wifi-client`: blocking HTTP for the Wi-Fi file API (§13). `default-features = false` drops
+# rustls, gzip and serde — the file API is plain HTTP on 192.168.169.1 and has no use for any
+# of them.
+ureq = { version = "3", default-features = false, optional = true }
+
+# `ble`: a real BLE central. btleplug is the portable one (CoreBluetooth / BlueZ / WinRT), and
+# it is async, which is what drags tokio and futures in with it.
+btleplug = { version = "0.13", optional = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"], optional = true }
+futures = { version = "0.3", optional = true }
+
+# `opus`: decoding the wake-word stream to PCM. Binds to the SYSTEM libopus — `brew install
+# opus` on macOS, `libopus-dev` on Debian — so this feature is the one most likely not to
+# build on a given machine. Nothing else depends on it.
+opus = { version = "0.3", optional = true }
+
 [features]
 default = []
 
@@ -44,6 +64,17 @@ uniffi = ["dep:uniffi"]
 # `cargo test` silently skips the binary rather than failing.
 bindgen = ["uniffi", "uniffi/cli", "uniffi/cargo-metadata"]
 
+# The Wi-Fi file API client: `client::fileapi::FileClient`, and `examples/gallery.rs`.
+# Adds one dependency (ureq) and no async runtime.
+wifi-client = ["dep:ureq"]
+
+# A BLE central: `client::ble::Glasses`, and `examples/luma.rs`. This is the feature that turns
+# the crate from a protocol library into a laptop client.
+ble = ["dep:btleplug", "dep:tokio", "dep:futures"]
+
+# Opus decode + a WAV writer: `client::opus`. Needs the system libopus; see the dependency note.
+opus = ["dep:opus"]
+
 [[bin]]
 name = "uniffi-bindgen"
 path = "src/bin/uniffi-bindgen.rs"
@@ -56,3 +87,18 @@ path = "examples/decode.rs"
 [[example]]
 name = "commands"
 path = "examples/commands.rs"
+
+# std only: the whole live-view path (RTSP over TCP, RTP over UDP) with no dependency at all.
+[[example]]
+name = "live"
+path = "examples/live.rs"
+
+[[example]]
+name = "gallery"
+path = "examples/gallery.rs"
+required-features = ["wifi-client"]
+
+[[example]]
+name = "luma"
+path = "examples/luma.rs"
+required-features = ["ble"]

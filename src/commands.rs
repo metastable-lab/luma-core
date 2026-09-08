@@ -77,7 +77,9 @@ impl LedLevel {
     /// clamp — a clamp would push an out-of-range setting BACK to the hardware as a plausible
     /// one, and on iOS the reported level round-trips through `@AppStorage` to the device.
     pub fn from_level(level: u8) -> Option<LedLevel> {
-        LedLevel::ALL.into_iter().find(|l| l.ascii() - b'0' == level)
+        LedLevel::ALL
+            .into_iter()
+            .find(|l| l.ascii() - b'0' == level)
     }
 }
 
@@ -352,7 +354,10 @@ mod tests {
     /// levels; this is the middle one.
     #[test]
     fn set_led_matches_the_captured_frame() {
-        assert_eq!(set_led(LedLevel::Mid), vec![0xAB, 0x55, 0x00, 0x03, 0x01, 0x31, 0x32]);
+        assert_eq!(
+            set_led(LedLevel::Mid),
+            vec![0xAB, 0x55, 0x00, 0x03, 0x01, 0x31, 0x32]
+        );
     }
 
     /// The two boolean conventions are NOT the same byte, and this is the test that says so.
@@ -360,17 +365,32 @@ mod tests {
     /// accepts and reads as neither on nor off.
     #[test]
     fn settings_booleans_are_ascii_and_media_booleans_are_raw() {
-        assert_eq!(decode_app(&set_voice_command(true)).unwrap().data, vec![0x31]);
-        assert_eq!(decode_app(&set_wear_detection(false)).unwrap().data, vec![0x30]);
+        assert_eq!(
+            decode_app(&set_voice_command(true)).unwrap().data,
+            vec![0x31]
+        );
+        assert_eq!(
+            decode_app(&set_wear_detection(false)).unwrap().data,
+            vec![0x30]
+        );
         assert_eq!(decode_app(&play_pause(true)).unwrap().data, vec![0x01]);
-        assert_eq!(decode_app(&voice_recording(false)).unwrap().data, vec![0x00]);
+        assert_eq!(
+            decode_app(&voice_recording(false)).unwrap().data,
+            vec![0x00]
+        );
     }
 
     #[test]
     fn record_duration_is_two_byte_big_endian() {
         // 60 s and 180 s, both captured.
-        assert_eq!(decode_app(&set_record_duration(60)).unwrap().data, vec![0x00, 0x3C]);
-        assert_eq!(decode_app(&set_record_duration(180)).unwrap().data, vec![0x00, 0xB4]);
+        assert_eq!(
+            decode_app(&set_record_duration(60)).unwrap().data,
+            vec![0x00, 0x3C]
+        );
+        assert_eq!(
+            decode_app(&set_record_duration(180)).unwrap().data,
+            vec![0x00, 0xB4]
+        );
     }
 
     /// Plain hex, not BCD. A BCD encoder would put `0x26` here for year 26 and set the clock
@@ -385,35 +405,67 @@ mod tests {
     /// without noticing — which is exactly what Android did with `0x67`.
     #[test]
     fn both_wifi_services_open_through_one_builder() {
-        assert_eq!(decode_app(&open_wifi(WifiService::Files, false)).unwrap().cmd, 0x39);
-        assert_eq!(decode_app(&open_wifi(WifiService::Live, false)).unwrap().cmd, 0x67);
-        assert_eq!(decode_app(&open_wifi(WifiService::Live, true)).unwrap().data, vec![0x31]);
+        assert_eq!(
+            decode_app(&open_wifi(WifiService::Files, false))
+                .unwrap()
+                .cmd,
+            0x39
+        );
+        assert_eq!(
+            decode_app(&open_wifi(WifiService::Live, false))
+                .unwrap()
+                .cmd,
+            0x67
+        );
+        assert_eq!(
+            decode_app(&open_wifi(WifiService::Live, true))
+                .unwrap()
+                .data,
+            vec![0x31]
+        );
     }
 
     /// The three `0x44` forms differ only in two payload bytes and mean entirely different
     /// things to the device; pinned together so one cannot be edited into another.
     #[test]
     fn the_three_download_completions_stay_distinct() {
-        assert_eq!(decode_app(&file_download_complete()).unwrap().data, vec![0x30, 0x00]);
+        assert_eq!(
+            decode_app(&file_download_complete()).unwrap().data,
+            vec![0x30, 0x00]
+        );
         assert_eq!(decode_app(&power_off_isp()).unwrap().data, vec![0x30, 0x01]);
-        assert_eq!(decode_app(&file_download_partial(7)).unwrap().data, vec![0x31, 0x07]);
+        assert_eq!(
+            decode_app(&file_download_partial(7)).unwrap().data,
+            vec![0x31, 0x07]
+        );
     }
 
     /// Every no-payload read carries the protocol's `0x00` filler (§2.1.1), which the captured
     /// reads all do.
     #[test]
     fn no_payload_reads_carry_the_mandated_filler() {
-        for frame in [get_battery(), get_versions(), get_project_name(), get_switch_states()] {
+        for frame in [
+            get_battery(),
+            get_versions(),
+            get_project_name(),
+            get_switch_states(),
+        ] {
             assert_eq!(decode_app(&frame).unwrap().data, vec![0x00]);
         }
-        assert_eq!(get_battery(), vec![0xAB, 0x55, 0x00, 0x03, 0x17, 0x00, 0x17]);
+        assert_eq!(
+            get_battery(),
+            vec![0xAB, 0x55, 0x00, 0x03, 0x17, 0x00, 0x17]
+        );
     }
 
     /// A gesture setter and its slot share a byte, and the value is the action's ASCII digit —
     /// the captured defaults round-trip through the setter.
     #[test]
     fn gesture_setters_round_trip_the_captured_defaults() {
-        for (slot, want) in GestureSlot::ALL.into_iter().zip(GestureSlot::CAPTURED_DEFAULTS) {
+        for (slot, want) in GestureSlot::ALL
+            .into_iter()
+            .zip(GestureSlot::CAPTURED_DEFAULTS)
+        {
             let action = GestureAction::from_value(want).expect("a captured default maps");
             let f = decode_app(&set_gesture(slot, action)).unwrap();
             assert_eq!(f.cmd, slot.code());
@@ -424,9 +476,24 @@ mod tests {
     #[test]
     fn volume_addresses_one_channel_at_a_time_and_carries_the_level_verbatim() {
         // The captured slider writes: `70 01 07`, `70 00 06`, `70 02 06`.
-        assert_eq!(decode_app(&set_volume(VolumeChannel::Media, 0x07)).unwrap().data, vec![0x01, 0x07]);
-        assert_eq!(decode_app(&set_volume(VolumeChannel::System, 0x06)).unwrap().data, vec![0x00, 0x06]);
-        assert_eq!(decode_app(&set_volume(VolumeChannel::Call, 0x06)).unwrap().data, vec![0x02, 0x06]);
+        assert_eq!(
+            decode_app(&set_volume(VolumeChannel::Media, 0x07))
+                .unwrap()
+                .data,
+            vec![0x01, 0x07]
+        );
+        assert_eq!(
+            decode_app(&set_volume(VolumeChannel::System, 0x06))
+                .unwrap()
+                .data,
+            vec![0x00, 0x06]
+        );
+        assert_eq!(
+            decode_app(&set_volume(VolumeChannel::Call, 0x06))
+                .unwrap()
+                .data,
+            vec![0x02, 0x06]
+        );
     }
 
     #[test]
@@ -442,18 +509,42 @@ mod tests {
     #[test]
     fn every_builder_emits_a_decodable_frame() {
         let frames = [
-            take_photo(true), start_video(), stop_video(), voice_recording(true),
-            get_file_count(), open_wifi(WifiService::Files, false), file_download_complete(),
-            file_download_partial(3), power_off_isp(), switch_music(true), play_pause(false),
-            volume_step(true), answer_hangup(false), set_volume(VolumeChannel::Call, 8),
-            get_volumes(), interrupt_voice(), retransmit_voice(), get_voice_disable_state(),
-            set_led(LedLevel::High), set_record_duration(90), set_wear_detection(true),
-            set_voice_command(false), set_orientation(Orientation::Landscape),
+            take_photo(true),
+            start_video(),
+            stop_video(),
+            voice_recording(true),
+            get_file_count(),
+            open_wifi(WifiService::Files, false),
+            file_download_complete(),
+            file_download_partial(3),
+            power_off_isp(),
+            switch_music(true),
+            play_pause(false),
+            volume_step(true),
+            answer_hangup(false),
+            set_volume(VolumeChannel::Call, 8),
+            get_volumes(),
+            interrupt_voice(),
+            retransmit_voice(),
+            get_voice_disable_state(),
+            set_led(LedLevel::High),
+            set_record_duration(90),
+            set_wear_detection(true),
+            set_voice_command(false),
+            set_orientation(Orientation::Landscape),
             set_offline_voice_language(true),
             set_gesture(GestureSlot::DoubleTap, GestureAction::NextTrack),
-            send_phone_time(2026, 1, 1, 0, 0, 0), get_switch_states(), get_device_status(),
-            get_battery(), get_versions(), get_project_name(), get_capabilities(),
-            factory_reset(), reboot(), enter_upgrade(true), send_isp_version(1, 3, 1),
+            send_phone_time(2026, 1, 1, 0, 0, 0),
+            get_switch_states(),
+            get_device_status(),
+            get_battery(),
+            get_versions(),
+            get_project_name(),
+            get_capabilities(),
+            factory_reset(),
+            reboot(),
+            enter_upgrade(true),
+            send_isp_version(1, 3, 1),
         ];
         for f in &frames {
             let decoded = decode_app(f).expect("builder output decodes");

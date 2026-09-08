@@ -35,15 +35,22 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::aac;
 use crate::commands;
+use crate::fileapi;
 use crate::frame::{self, Deframer, Frame, Residual};
 use crate::gatt;
+use crate::h264;
 use crate::opcodes::{AppCommand, Evidence, GestureAction, GestureSlot, VolumeChannel};
 use crate::parser::{
     self, DeviceAction, DeviceEvent, MalformedReason, Orientation, Parser, SwitchReport,
     SwitchStates, WifiService,
 };
 use crate::reassembly::{FileAbort, FileEvent, FileKind, FileReassembler};
+use crate::rtp;
+use crate::rtsp;
+use crate::sdp::{self, SessionDescription};
+use crate::timing;
 use crate::voice::{EndCause, OpusBandwidth, OpusMode, OpusToc, VoiceEvent, VoiceStream};
 
 // ---------------------------------------------------------------------------------------
@@ -670,7 +677,10 @@ pub fn glasses_gesture_action_value(action: FfiGlassesGestureAction) -> u8 {
 /// The three LED brightnesses, dim → bright.
 #[uniffi::export]
 pub fn glasses_led_levels() -> Vec<FfiGlassesLedLevel> {
-    commands::LedLevel::ALL.into_iter().map(Into::into).collect()
+    commands::LedLevel::ALL
+        .into_iter()
+        .map(Into::into)
+        .collect()
 }
 
 /// Map a REPORTED LED level back to the enum [`glasses_set_led`] takes.
@@ -2083,6 +2093,1154 @@ pub fn glasses_max_file_bytes() -> u32 {
     crate::reassembly::MAX_FILE_BYTES as u32
 }
 
+// =======================================================================================
+// The Wi-Fi file API (§13) — src/fileapi.rs
+// =======================================================================================
+
+/// The four folders the firmware serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiGlassesFolder {
+    Event,
+    Aac,
+    Loop,
+    Emr,
+}
+
+impl From<fileapi::Folder> for FfiGlassesFolder {
+    fn from(f: fileapi::Folder) -> Self {
+        match f {
+            fileapi::Folder::Event => FfiGlassesFolder::Event,
+            fileapi::Folder::Aac => FfiGlassesFolder::Aac,
+            fileapi::Folder::Loop => FfiGlassesFolder::Loop,
+            fileapi::Folder::Emr => FfiGlassesFolder::Emr,
+        }
+    }
+}
+
+impl From<FfiGlassesFolder> for fileapi::Folder {
+    fn from(f: FfiGlassesFolder) -> Self {
+        match f {
+            FfiGlassesFolder::Event => fileapi::Folder::Event,
+            FfiGlassesFolder::Aac => fileapi::Folder::Aac,
+            FfiGlassesFolder::Loop => fileapi::Folder::Loop,
+            FfiGlassesFolder::Emr => fileapi::Folder::Emr,
+        }
+    }
+}
+
+/// What a folder holds. From the folder, not from the per-row `type` byte, which is `1` for
+/// everything seen so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiGlassesMediaKind {
+    Photo,
+    VoiceRecording,
+    VideoClip,
+    Emergency,
+}
+
+impl From<fileapi::MediaKind> for FfiGlassesMediaKind {
+    fn from(k: fileapi::MediaKind) -> Self {
+        match k {
+            fileapi::MediaKind::Photo => FfiGlassesMediaKind::Photo,
+            fileapi::MediaKind::VoiceRecording => FfiGlassesMediaKind::VoiceRecording,
+            fileapi::MediaKind::VideoClip => FfiGlassesMediaKind::VideoClip,
+            fileapi::MediaKind::Emergency => FfiGlassesMediaKind::Emergency,
+        }
+    }
+}
+
+/// `createtimestr`, split into fields.
+///
+/// Fields and not an instant: the glasses keep their own clock from `0x59` and there is no zone
+/// on this wire, so converting it to a timestamp here would be inventing an offset. The binding
+/// layer knows the phone's zone; this does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct FfiGlassesTimestamp {
+    pub year: u16,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+}
+
+impl From<fileapi::Timestamp> for FfiGlassesTimestamp {
+    fn from(t: fileapi::Timestamp) -> Self {
+        FfiGlassesTimestamp {
+            year: t.year,
+            month: t.month,
+            day: t.day,
+            hour: t.hour,
+            minute: t.minute,
+            second: t.second,
+        }
+    }
+}
+
+/// One row of the listing.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiGlassesFileEntry {
+    /// `EVENT/20260727223716.jpg` — folder prefix included. Every URL builder takes this.
+    pub name: String,
+    /// The filename alone, for naming it on local storage.
+    pub basename: String,
+    pub folder: FfiGlassesFolder,
+    /// **KiB, floored.** See [`glasses_wifi_download_is_complete`].
+    pub size_kib: u64,
+    pub created: Option<FfiGlassesTimestamp>,
+    pub kind: FfiGlassesMediaKind,
+    /// The `type` field. `1` in every row seen.
+    pub raw_type: i64,
+    /// Lowest byte count a complete download of this file can have.
+    pub min_bytes: u64,
+    /// Highest byte count a complete download of this file can have.
+    pub max_bytes: u64,
+}
+
+impl From<&fileapi::FileEntry> for FfiGlassesFileEntry {
+    fn from(f: &fileapi::FileEntry) -> Self {
+        let range = f.expected_byte_range();
+        FfiGlassesFileEntry {
+            name: f.name.clone(),
+            basename: f.basename().to_string(),
+            folder: f.folder.into(),
+            size_kib: f.size_kib,
+            created: f.created.map(Into::into),
+            kind: f.kind.into(),
+            raw_type: f.raw_type,
+            min_bytes: *range.start(),
+            max_bytes: *range.end(),
+        }
+    }
+}
+
+/// One folder's rows.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiGlassesFolderListing {
+    pub folder: FfiGlassesFolder,
+    pub files: Vec<FfiGlassesFileEntry>,
+    /// The device's own `count`, raw. It does NOT always equal `files.len()` — a live listing
+    /// said 2 beside a one-row array — and rounding the two together hides that.
+    pub count: u64,
+}
+
+/// A parsed `/app/getfilelist` reply.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiGlassesFileList {
+    pub result: i64,
+    pub folders: Vec<FfiGlassesFolderListing>,
+    pub total_files: u32,
+    pub total_size_kib: u64,
+}
+
+impl From<&fileapi::FileList> for FfiGlassesFileList {
+    fn from(l: &fileapi::FileList) -> Self {
+        FfiGlassesFileList {
+            result: l.result,
+            folders: l
+                .folders
+                .iter()
+                .map(|f| FfiGlassesFolderListing {
+                    folder: f.folder.into(),
+                    files: f.files.iter().map(Into::into).collect(),
+                    count: f.count,
+                })
+                .collect(),
+            total_files: l.total_files() as u32,
+            total_size_kib: l.total_size_kib(),
+        }
+    }
+}
+
+/// A parsed `/app/deletefile` reply.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiGlassesDeleteReply {
+    pub result: i64,
+    pub info: String,
+    /// `result == 0`. The string is a courtesy; this is the authority.
+    pub success: bool,
+}
+
+/// Why a reply body did not parse.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiGlassesWifiParseError {
+    /// Not JSON — an HTML error page, an empty body, a captive portal.
+    NotJson {
+        at: u32,
+    },
+    /// Ended mid-value. A caller streaming the body can WAIT on this and must not on the others.
+    Truncated,
+    TrailingBytes {
+        at: u32,
+    },
+    TooDeep,
+    MissingField {
+        field: String,
+    },
+    WrongType {
+        field: String,
+        expected: String,
+    },
+    BadNumber {
+        field: String,
+    },
+    /// A folder outside EVENT/AAC/LOOP/EMR: not a listing from these glasses.
+    UnknownFolder {
+        folder: String,
+    },
+}
+
+impl From<fileapi::ParseError> for FfiGlassesWifiParseError {
+    fn from(e: fileapi::ParseError) -> Self {
+        match e {
+            fileapi::ParseError::NotJson { at } => {
+                FfiGlassesWifiParseError::NotJson { at: at as u32 }
+            }
+            fileapi::ParseError::Truncated => FfiGlassesWifiParseError::Truncated,
+            fileapi::ParseError::TrailingBytes { at } => {
+                FfiGlassesWifiParseError::TrailingBytes { at: at as u32 }
+            }
+            fileapi::ParseError::TooDeep => FfiGlassesWifiParseError::TooDeep,
+            fileapi::ParseError::MissingField { field } => FfiGlassesWifiParseError::MissingField {
+                field: field.to_string(),
+            },
+            fileapi::ParseError::WrongType { field, expected } => {
+                FfiGlassesWifiParseError::WrongType {
+                    field: field.to_string(),
+                    expected: expected.to_string(),
+                }
+            }
+            fileapi::ParseError::BadNumber { field } => FfiGlassesWifiParseError::BadNumber {
+                field: field.to_string(),
+            },
+            fileapi::ParseError::UnknownFolder { folder } => {
+                FfiGlassesWifiParseError::UnknownFolder { folder }
+            }
+        }
+    }
+}
+
+/// Listing parse outcome. A total value, never a thrown error — the same shape as
+/// [`FfiGlassesDecoded`], for the same reason.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiGlassesFileListResult {
+    Ok { list: FfiGlassesFileList },
+    Err { reason: FfiGlassesWifiParseError },
+}
+
+/// Delete-reply parse outcome.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiGlassesDeleteReplyResult {
+    Ok { reply: FfiGlassesDeleteReply },
+    Err { reason: FfiGlassesWifiParseError },
+}
+
+/// `192.168.169.1` — the glasses on their own access point.
+#[uniffi::export]
+pub fn glasses_wifi_host() -> String {
+    fileapi::HOST.to_string()
+}
+
+/// `192.168.169.100` — the address the glasses' DHCP hands the phone. How a client tells
+/// "joined" from "still on the house network" without a round trip.
+#[uniffi::export]
+pub fn glasses_wifi_phone_address() -> String {
+    fileapi::PHONE_ADDRESS.to_string()
+}
+
+/// `http://192.168.169.1`.
+#[uniffi::export]
+pub fn glasses_wifi_base_url() -> String {
+    fileapi::BASE_URL.to_string()
+}
+
+/// `http://192.168.169.1/app/getfilelist`.
+#[uniffi::export]
+pub fn glasses_wifi_list_url() -> String {
+    fileapi::list_url()
+}
+
+/// `http://192.168.169.1/app/getthumbnail?file=<name>`.
+#[uniffi::export]
+pub fn glasses_wifi_thumbnail_url(name: String) -> String {
+    fileapi::thumbnail_url(&name)
+}
+
+/// `http://192.168.169.1/<name>` — the file itself.
+#[uniffi::export]
+pub fn glasses_wifi_download_url(name: String) -> String {
+    fileapi::download_url(&name)
+}
+
+/// `http://192.168.169.1/app/deletefile?file=<name>`.
+#[uniffi::export]
+pub fn glasses_wifi_delete_url(name: String) -> String {
+    fileapi::delete_url(&name)
+}
+
+/// The four folders, in listing order.
+#[uniffi::export]
+pub fn glasses_wifi_folders() -> Vec<FfiGlassesFolder> {
+    fileapi::Folder::ALL.into_iter().map(Into::into).collect()
+}
+
+/// The wire name of a folder — `EVENT`, `AAC`, `LOOP`, `EMR`.
+#[uniffi::export]
+pub fn glasses_wifi_folder_name(folder: FfiGlassesFolder) -> String {
+    fileapi::Folder::from(folder).name().to_string()
+}
+
+/// What a folder holds.
+#[uniffi::export]
+pub fn glasses_wifi_folder_holds(folder: FfiGlassesFolder) -> FfiGlassesMediaKind {
+    fileapi::Folder::from(folder).holds().into()
+}
+
+/// Parse a `/app/getfilelist` reply body.
+#[uniffi::export]
+pub fn glasses_wifi_parse_file_list(json: String) -> FfiGlassesFileListResult {
+    match fileapi::parse_file_list(&json) {
+        Ok(l) => FfiGlassesFileListResult::Ok {
+            list: FfiGlassesFileList::from(&l),
+        },
+        Err(e) => FfiGlassesFileListResult::Err { reason: e.into() },
+    }
+}
+
+/// Parse a `/app/deletefile` reply body.
+#[uniffi::export]
+pub fn glasses_wifi_parse_delete_reply(json: String) -> FfiGlassesDeleteReplyResult {
+    match fileapi::parse_delete_reply(&json) {
+        Ok(r) => FfiGlassesDeleteReplyResult::Ok {
+            reply: FfiGlassesDeleteReply {
+                result: r.result,
+                success: r.is_success(),
+                info: r.info,
+            },
+        },
+        Err(e) => FfiGlassesDeleteReplyResult::Err { reason: e.into() },
+    }
+}
+
+/// Whether a download of `bytes` bytes is a complete copy of a file listed as `size_kib` KiB.
+///
+/// `size` is KIBIBYTES and it is floored, so the answer is `bytes ∈ [size*1024, size*1024+1023]`.
+/// Comparing `bytes` to `size` rejects every download; demanding `bytes == size * 1024` rejects
+/// 1023 in 1024.
+#[uniffi::export]
+pub fn glasses_wifi_download_is_complete(size_kib: u64, bytes: u64) -> bool {
+    fileapi::download_is_complete(size_kib, bytes)
+}
+
+/// The byte range a file listed as `size_kib` may arrive as, inclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct FfiGlassesByteRange {
+    pub min: u64,
+    pub max: u64,
+}
+
+/// See [`glasses_wifi_download_is_complete`].
+#[uniffi::export]
+pub fn glasses_wifi_expected_byte_range(size_kib: u64) -> FfiGlassesByteRange {
+    let r = fileapi::expected_byte_range(size_kib);
+    FfiGlassesByteRange {
+        min: *r.start(),
+        max: *r.end(),
+    }
+}
+
+/// One step of a gallery sync.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiGlassesSyncStep {
+    /// `GET /app/getfilelist`.
+    List { url: String },
+    /// `GET /app/getthumbnail?file=…`.
+    Thumbnail { name: String, url: String },
+    /// `GET /<name>`, then check the length against `min_bytes..=max_bytes`.
+    Download {
+        name: String,
+        url: String,
+        size_kib: u64,
+        min_bytes: u64,
+        max_bytes: u64,
+    },
+    /// `GET /app/deletefile?file=…`.
+    Delete { name: String, url: String },
+    /// Write `0x44 30 00` over BLE and drop the network. Not an HTTP request; the step exists so
+    /// a driver cannot forget it and strand the phone on an AP with no route out.
+    TearDown,
+}
+
+/// The recommended order for a full gallery sync, from a listing already in hand.
+///
+/// List → every thumbnail → per file download-then-delete → tear the AP down. Thumbnails first
+/// because a picker can paint while the big files move; delete straight after each download
+/// because a sync that defers its deletes loses everything it fetched if the AP drops.
+#[uniffi::export]
+pub fn glasses_wifi_sync_plan(json: String, delete_after: bool) -> Vec<FfiGlassesSyncStep> {
+    let Ok(list) = fileapi::parse_file_list(&json) else {
+        return Vec::new();
+    };
+    fileapi::SyncPlan::full(&list, delete_after)
+        .into_iter()
+        .map(|s| match s {
+            fileapi::SyncStep::List => FfiGlassesSyncStep::List {
+                url: fileapi::list_url(),
+            },
+            fileapi::SyncStep::Thumbnail { name } => FfiGlassesSyncStep::Thumbnail {
+                url: fileapi::thumbnail_url(&name),
+                name,
+            },
+            fileapi::SyncStep::Download { name, size_kib } => {
+                let r = fileapi::expected_byte_range(size_kib);
+                FfiGlassesSyncStep::Download {
+                    url: fileapi::download_url(&name),
+                    name,
+                    size_kib,
+                    min_bytes: *r.start(),
+                    max_bytes: *r.end(),
+                }
+            }
+            fileapi::SyncStep::Delete { name } => FfiGlassesSyncStep::Delete {
+                url: fileapi::delete_url(&name),
+                name,
+            },
+            fileapi::SyncStep::TearDown => FfiGlassesSyncStep::TearDown,
+        })
+        .collect()
+}
+
+// =======================================================================================
+// Live view (§14) — RTSP, SDP, RTP, H.264, AAC
+// =======================================================================================
+
+/// `rtsp://192.168.169.1:554/h264`.
+#[uniffi::export]
+pub fn glasses_rtsp_url() -> String {
+    rtsp::URL.to_string()
+}
+
+/// The RTSP URL for another host.
+#[uniffi::export]
+pub fn glasses_rtsp_stream_url(host: String) -> String {
+    rtsp::stream_url(&host)
+}
+
+/// The default client ports — RTP even, RTCP the odd one above it.
+#[uniffi::export]
+pub fn glasses_rtsp_default_video_ports() -> Vec<u16> {
+    let (a, b) = rtsp::DEFAULT_VIDEO_CLIENT_PORTS;
+    vec![a, b]
+}
+
+/// The default audio client ports. Audio is optional; see [`GlassesRtspSession::new`].
+#[uniffi::export]
+pub fn glasses_rtsp_default_audio_ports() -> Vec<u16> {
+    let (a, b) = rtsp::DEFAULT_AUDIO_CLIENT_PORTS;
+    vec![a, b]
+}
+
+/// Which track a SETUP is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiGlassesTrack {
+    Video,
+    Audio,
+}
+
+impl From<rtsp::Track> for FfiGlassesTrack {
+    fn from(t: rtsp::Track) -> Self {
+        match t {
+            rtsp::Track::Video => FfiGlassesTrack::Video,
+            rtsp::Track::Audio => FfiGlassesTrack::Audio,
+        }
+    }
+}
+
+/// Where the RTSP conversation is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiGlassesRtspState {
+    Init,
+    AwaitingOptions,
+    AwaitingDescribe,
+    AwaitingSetupVideo,
+    AwaitingSetupAudio,
+    AwaitingPlay,
+    Playing,
+    AwaitingTeardown,
+    Closed,
+}
+
+impl From<rtsp::State> for FfiGlassesRtspState {
+    fn from(s: rtsp::State) -> Self {
+        match s {
+            rtsp::State::Init => FfiGlassesRtspState::Init,
+            rtsp::State::AwaitingOptions => FfiGlassesRtspState::AwaitingOptions,
+            rtsp::State::AwaitingDescribe => FfiGlassesRtspState::AwaitingDescribe,
+            rtsp::State::AwaitingSetup(rtsp::Track::Video) => {
+                FfiGlassesRtspState::AwaitingSetupVideo
+            }
+            rtsp::State::AwaitingSetup(rtsp::Track::Audio) => {
+                FfiGlassesRtspState::AwaitingSetupAudio
+            }
+            rtsp::State::AwaitingPlay => FfiGlassesRtspState::AwaitingPlay,
+            rtsp::State::Playing => FfiGlassesRtspState::Playing,
+            rtsp::State::AwaitingTeardown => FfiGlassesRtspState::AwaitingTeardown,
+            rtsp::State::Closed => FfiGlassesRtspState::Closed,
+        }
+    }
+}
+
+/// One `a=rtpmap:` line.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiGlassesRtpMap {
+    pub payload_type: u8,
+    pub encoding: String,
+    pub clock_rate: u32,
+    pub channels: Option<u8>,
+}
+
+/// One `m=` section of the description.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiGlassesSdpMedia {
+    /// `video` or `audio`.
+    pub kind: String,
+    pub port: u16,
+    pub protocol: String,
+    /// The dynamic payload type to expect on the wire: 96 video, 97 audio.
+    pub payload_type: u8,
+    pub rtpmap: Option<FfiGlassesRtpMap>,
+    /// `a=control:track0`, appended to the base URL to make the SETUP URL.
+    pub control: Option<String>,
+    /// `a=fmtp:` parameters, keys as sent. Look them up case-INSENSITIVELY: this server spells
+    /// two of RFC 3640's three as `indexlength` and `indexdeltalength`.
+    pub fmtp: Vec<FfiGlassesKeyValue>,
+    /// `sprop-parameter-sets`, base64-decoded. Empty here — the glasses put SPS/PPS in-band.
+    pub sprop_nal_units: Vec<Vec<u8>>,
+}
+
+/// A key/value pair, for the `fmtp` list.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiGlassesKeyValue {
+    pub key: String,
+    pub value: String,
+}
+
+/// A parsed session description.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiGlassesSdp {
+    pub session_name: Option<String>,
+    pub media: Vec<FfiGlassesSdpMedia>,
+}
+
+impl From<&SessionDescription> for FfiGlassesSdp {
+    fn from(s: &SessionDescription) -> Self {
+        FfiGlassesSdp {
+            session_name: s.name.clone(),
+            media: s
+                .media
+                .iter()
+                .map(|m| FfiGlassesSdpMedia {
+                    kind: m.kind.as_str().to_string(),
+                    port: m.port,
+                    protocol: m.protocol.clone(),
+                    payload_type: m.payload_type,
+                    rtpmap: m.rtpmap.as_ref().map(|r| FfiGlassesRtpMap {
+                        payload_type: r.payload_type,
+                        encoding: r.encoding.clone(),
+                        clock_rate: r.clock_rate,
+                        channels: r.channels,
+                    }),
+                    control: m.control.clone(),
+                    fmtp: m
+                        .fmtp
+                        .as_ref()
+                        .map(|f| {
+                            f.params
+                                .iter()
+                                .map(|(k, v)| FfiGlassesKeyValue {
+                                    key: k.clone(),
+                                    value: v.clone(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    sprop_nal_units: m
+                        .fmtp
+                        .as_ref()
+                        .map(|f| f.sprop_nal_units())
+                        .unwrap_or_default(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// SDP parse outcome.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiGlassesSdpResult {
+    Ok { sdp: FfiGlassesSdp },
+    Err { reason: String },
+}
+
+/// Parse a DESCRIBE body.
+#[uniffi::export]
+pub fn glasses_parse_sdp(text: String) -> FfiGlassesSdpResult {
+    match sdp::parse(&text) {
+        Ok(s) => FfiGlassesSdpResult::Ok {
+            sdp: FfiGlassesSdp::from(&s),
+        },
+        Err(e) => FfiGlassesSdpResult::Err {
+            reason: e.to_string(),
+        },
+    }
+}
+
+/// What a fed chunk of RTSP bytes meant.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiGlassesRtspEvent {
+    /// The `Public` header of the OPTIONS reply.
+    Options { methods: Vec<String> },
+    /// The DESCRIBE body parsed.
+    Described { sdp: FfiGlassesSdp },
+    /// A track is set up.
+    SetUp {
+        track: FfiGlassesTrack,
+        server_rtp_port: Option<u16>,
+        server_rtcp_port: Option<u16>,
+        session_id: String,
+    },
+    /// A SETUP was refused. Only ever emitted for audio — a refused video SETUP is an error.
+    SetUpRefused { track: FfiGlassesTrack, status: u16 },
+    /// PLAY succeeded; RTP is on its way to the client ports.
+    Playing,
+    /// TEARDOWN was acknowledged.
+    TornDown,
+    /// A response that did not advance the machine.
+    Other { status: u16, reason: String },
+}
+
+impl From<rtsp::Event> for FfiGlassesRtspEvent {
+    fn from(e: rtsp::Event) -> Self {
+        match e {
+            rtsp::Event::Options { methods } => FfiGlassesRtspEvent::Options { methods },
+            rtsp::Event::Described(s) => FfiGlassesRtspEvent::Described {
+                sdp: FfiGlassesSdp::from(s.as_ref()),
+            },
+            rtsp::Event::SetUp {
+                track,
+                server_ports,
+                session_id,
+            } => FfiGlassesRtspEvent::SetUp {
+                track: track.into(),
+                server_rtp_port: server_ports.map(|p| p.0),
+                server_rtcp_port: server_ports.map(|p| p.1),
+                session_id,
+            },
+            rtsp::Event::SetUpRefused { track, status } => FfiGlassesRtspEvent::SetUpRefused {
+                track: track.into(),
+                status,
+            },
+            rtsp::Event::Playing => FfiGlassesRtspEvent::Playing,
+            rtsp::Event::TornDown => FfiGlassesRtspEvent::TornDown,
+            rtsp::Event::Other(r) => FfiGlassesRtspEvent::Other {
+                status: r.status,
+                reason: r.reason.clone(),
+            },
+        }
+    }
+}
+
+/// Feeding RTSP bytes in: what came out.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiGlassesRtspFeed {
+    Ok { events: Vec<FfiGlassesRtspEvent> },
+    Err { reason: String },
+}
+
+/// The OPTIONS → DESCRIBE → SETUP → PLAY conversation, as a state machine over bytes.
+///
+/// Produces request bytes and consumes response bytes; opens no socket and holds no clock. The
+/// loop is: `pending_request()` → write → read → `feed()` → repeat until `is_playing()`.
+#[derive(uniffi::Object)]
+pub struct GlassesRtspSession {
+    inner: Mutex<rtsp::RtspSession>,
+}
+
+#[uniffi::export]
+impl GlassesRtspSession {
+    /// A session against the glasses at their fixed address, video only.
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(rtsp::RtspSession::new()),
+        })
+    }
+
+    /// A session with an explicit URL, client ports and audio choice.
+    ///
+    /// `want_audio` is off in the default constructor because no captured session ever set up
+    /// track1 — turning it on is fine, and a refusal is reported rather than fatal.
+    #[uniffi::constructor]
+    pub fn with_options(
+        url: String,
+        video_rtp_port: u16,
+        audio_rtp_port: u16,
+        want_audio: bool,
+    ) -> Arc<Self> {
+        let s = rtsp::RtspSession::for_url(&url)
+            .video_client_ports((video_rtp_port, video_rtp_port.wrapping_add(1)))
+            .audio_client_ports((audio_rtp_port, audio_rtp_port.wrapping_add(1)))
+            .request_audio(want_audio);
+        Arc::new(Self {
+            inner: Mutex::new(s),
+        })
+    }
+
+    /// The first request. `None` once one is outstanding.
+    pub fn next_request(&self) -> Option<Vec<u8>> {
+        self.lock().next_request()
+    }
+
+    /// The next request the machine wants, after a response has been handled. `None` means
+    /// wait, play, or stop.
+    pub fn pending_request(&self) -> Option<Vec<u8>> {
+        self.lock().pending_request()
+    }
+
+    /// Feed whatever the socket returned, in whatever chunks it arrived in.
+    pub fn feed(&self, bytes: Vec<u8>) -> FfiGlassesRtspFeed {
+        match self.lock().feed(&bytes) {
+            Ok(events) => FfiGlassesRtspFeed::Ok {
+                events: events.into_iter().map(Into::into).collect(),
+            },
+            Err(e) => FfiGlassesRtspFeed::Err {
+                reason: e.to_string(),
+            },
+        }
+    }
+
+    /// The TEARDOWN request, and move to `AwaitingTeardown`.
+    pub fn teardown(&self) -> Vec<u8> {
+        self.lock().teardown()
+    }
+
+    pub fn state(&self) -> FfiGlassesRtspState {
+        self.lock().state().into()
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.lock().is_playing()
+    }
+
+    pub fn session_id(&self) -> Option<String> {
+        self.lock().session_id().map(str::to_string)
+    }
+
+    /// The parsed DESCRIBE body, once it has arrived.
+    pub fn sdp(&self) -> Option<FfiGlassesSdp> {
+        self.lock().sdp().map(FfiGlassesSdp::from)
+    }
+
+    /// The port the client should bind for video RTP.
+    pub fn video_client_port(&self) -> u16 {
+        self.lock().client_ports(rtsp::Track::Video).0
+    }
+
+    /// The port the client should bind for audio RTP.
+    pub fn audio_client_port(&self) -> u16 {
+        self.lock().client_ports(rtsp::Track::Audio).0
+    }
+
+    /// Where the server streams video from, from the SETUP `Transport` header.
+    pub fn video_server_port(&self) -> Option<u16> {
+        self.lock().video_server_ports().map(|p| p.0)
+    }
+
+    /// Give up without sending anything.
+    pub fn close(&self) {
+        self.lock().close();
+    }
+}
+
+impl GlassesRtspSession {
+    fn lock(&self) -> std::sync::MutexGuard<'_, rtsp::RtspSession> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// A parsed RTP header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct FfiGlassesRtpHeader {
+    pub payload_type: u8,
+    /// Set on the last packet of an access unit and nowhere else.
+    pub marker: bool,
+    pub sequence: u16,
+    /// 90 kHz on video, 16 kHz on audio.
+    pub timestamp: u32,
+    pub ssrc: u32,
+    /// Where the payload starts: past the fixed header, the CSRC list and any extension.
+    pub payload_offset: u32,
+    pub payload_len: u32,
+}
+
+/// RTP parse outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiGlassesRtpParsed {
+    Ok { header: FfiGlassesRtpHeader },
+    Err,
+}
+
+/// Parse one RTP datagram's header.
+#[uniffi::export]
+pub fn glasses_parse_rtp(packet: Vec<u8>) -> FfiGlassesRtpParsed {
+    match rtp::parse(&packet) {
+        Ok(p) => FfiGlassesRtpParsed::Ok {
+            header: FfiGlassesRtpHeader {
+                payload_type: p.header.payload_type,
+                marker: p.header.marker,
+                sequence: p.header.sequence,
+                timestamp: p.header.timestamp,
+                ssrc: p.header.ssrc,
+                payload_offset: p.header.payload_offset as u32,
+                payload_len: p.payload.len() as u32,
+            },
+        },
+        Err(_) => FfiGlassesRtpParsed::Err,
+    }
+}
+
+/// One picture, in Annex B.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiGlassesAccessUnit {
+    /// 90 kHz RTP timestamp, so `timestamp / 90000` is seconds.
+    pub timestamp: u32,
+    /// `00 00 00 01 <nal>` repeated. Write these bytes to a `.h264` and ffplay opens it.
+    pub data: Vec<u8>,
+    pub nal_types: Vec<u8>,
+    pub is_keyframe: bool,
+    /// An IDR that arrived with its SPS and PPS: a decoder handed this first can decode from
+    /// here. A recording must start at one of these or it is grey until the next keyframe.
+    pub is_decodable_start: bool,
+    /// `false` means the timestamp changed rather than the marker bit arriving — a sign of loss.
+    pub closed_by_marker: bool,
+}
+
+impl From<h264::AccessUnit> for FfiGlassesAccessUnit {
+    fn from(a: h264::AccessUnit) -> Self {
+        FfiGlassesAccessUnit {
+            timestamp: a.timestamp,
+            is_keyframe: a.is_keyframe(),
+            is_decodable_start: a.is_decodable_start(),
+            closed_by_marker: a.closed_by_marker,
+            nal_types: a.nal_types.clone(),
+            data: a.data,
+        }
+    }
+}
+
+/// Running counts from the H.264 depacketiser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct FfiGlassesH264Stats {
+    pub access_units: u64,
+    pub keyframes: u64,
+    pub nal_units: u64,
+    pub bytes: u64,
+    /// FU-A continuations whose start packet was lost. The NAL header lived in that packet, so
+    /// the fragment is dropped rather than emitted headless.
+    pub dropped_fragments: u64,
+    pub unsupported_packets: u64,
+    pub units_closed_without_marker: u64,
+}
+
+/// RFC 6184 depacketiser: RTP packets in, Annex B access units out.
+#[derive(uniffi::Object)]
+pub struct GlassesH264Depacketizer {
+    inner: Mutex<h264::Depacketizer>,
+}
+
+#[uniffi::export]
+impl GlassesH264Depacketizer {
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(h264::Depacketizer::new()),
+        })
+    }
+
+    /// Feed one whole RTP datagram; get whole pictures back, as Annex B byte strings.
+    ///
+    /// Usually empty — one picture is spread over dozens of packets and only the one with the
+    /// marker bit closes it.
+    pub fn push(&self, packet: Vec<u8>) -> Vec<Vec<u8>> {
+        self.lock()
+            .push(&packet)
+            .into_iter()
+            .map(|a| a.data)
+            .collect()
+    }
+
+    /// [`Self::push`], with the metadata a recorder needs to decide where to start.
+    pub fn push_detailed(&self, packet: Vec<u8>) -> Vec<FfiGlassesAccessUnit> {
+        self.lock()
+            .push(&packet)
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    /// Whether a unit with an IDR AND its parameter sets has been emitted. A recorder should
+    /// drop everything before the first one.
+    pub fn keyframe_seen(&self) -> bool {
+        self.lock().keyframe_seen()
+    }
+
+    /// The most recent SPS and PPS in Annex B, for a decoder that wants them out of band.
+    pub fn parameter_sets(&self) -> Vec<u8> {
+        self.lock().parameter_sets_annex_b()
+    }
+
+    /// Close whatever is open and hand it over. For end of stream.
+    pub fn flush(&self) -> Option<FfiGlassesAccessUnit> {
+        self.lock().flush().map(Into::into)
+    }
+
+    pub fn stats(&self) -> FfiGlassesH264Stats {
+        let s = self.lock().stats();
+        FfiGlassesH264Stats {
+            access_units: s.access_units,
+            keyframes: s.keyframes,
+            nal_units: s.nal_units,
+            bytes: s.bytes,
+            dropped_fragments: s.dropped_fragments,
+            unsupported_packets: s.unsupported_packets,
+            units_closed_without_marker: s.units_closed_without_marker,
+        }
+    }
+
+    /// Drop every partial NAL and picture, keep the counts. For a stalled stream.
+    pub fn reset(&self) {
+        self.lock().reset();
+    }
+}
+
+impl GlassesH264Depacketizer {
+    fn lock(&self) -> std::sync::MutexGuard<'_, h264::Depacketizer> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// The NAL type of a NAL header byte — the low five bits. 5 IDR, 7 SPS, 8 PPS.
+#[uniffi::export]
+pub fn glasses_h264_nal_type(header_byte: u8) -> u8 {
+    h264::nal_type(header_byte)
+}
+
+/// `00 00 00 01`, the Annex B start code.
+#[uniffi::export]
+pub fn glasses_h264_start_code() -> Vec<u8> {
+    h264::START_CODE.to_vec()
+}
+
+/// A decoded `config=` value from the SDP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Record)]
+pub struct FfiGlassesAacConfig {
+    /// 2 is AAC-LC. The ADTS `profile` field is this minus one.
+    pub object_type: u8,
+    pub sampling_frequency_index: u8,
+    pub channel_configuration: u8,
+    pub sample_rate_hz: u32,
+}
+
+impl From<aac::AudioSpecificConfig> for FfiGlassesAacConfig {
+    fn from(c: aac::AudioSpecificConfig) -> Self {
+        FfiGlassesAacConfig {
+            object_type: c.object_type,
+            sampling_frequency_index: c.sampling_frequency_index,
+            channel_configuration: c.channel_configuration,
+            sample_rate_hz: c.sample_rate_hz,
+        }
+    }
+}
+
+/// The config the glasses advertise: `1408` — AAC-LC, 16 kHz, mono.
+#[uniffi::export]
+pub fn glasses_aac_config() -> FfiGlassesAacConfig {
+    aac::AudioSpecificConfig::GLASSES.into()
+}
+
+/// Decode an SDP `config=` hex string. `None` for a value this crate will not guess at.
+#[uniffi::export]
+pub fn glasses_aac_parse_config(hex: String) -> Option<FfiGlassesAacConfig> {
+    aac::parse_config_hex(&hex).ok().map(Into::into)
+}
+
+/// The seven-byte ADTS header for one raw AAC frame of `frame_len` bytes.
+///
+/// The length written into the header is `frame_len + 7` — ADTS counts itself. Concatenate
+/// header + frame per frame and the result plays as a `.aac`. Empty when the frame will not fit
+/// the 13-bit length field.
+#[uniffi::export]
+pub fn glasses_adts_header(frame_len: u32) -> Vec<u8> {
+    aac::adts_header(&aac::AudioSpecificConfig::GLASSES, frame_len as usize)
+        .map(|h| h.to_vec())
+        .unwrap_or_default()
+}
+
+/// RFC 3640 AAC-hbr depacketiser: RTP packets in, raw AAC frames out.
+#[derive(uniffi::Object)]
+pub struct GlassesAacDepacketizer {
+    inner: Mutex<aac::Depacketizer>,
+}
+
+#[uniffi::export]
+impl GlassesAacDepacketizer {
+    /// With the glasses' header widths — `sizeLength=13`, `indexLength=3`,
+    /// `indexDeltaLength=3`.
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(aac::Depacketizer::new()),
+        })
+    }
+
+    /// With widths read out of the SDP's `a=fmtp:` line.
+    #[uniffi::constructor]
+    pub fn with_widths(size_length: u8, index_length: u8, index_delta_length: u8) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(aac::Depacketizer::with_config(aac::AuHeaderConfig {
+                size_length,
+                index_length,
+                index_delta_length,
+            })),
+        })
+    }
+
+    /// Feed one RTP datagram; get the AAC frames out of it. Wrap each with
+    /// [`glasses_adts_header`] to write a playable file.
+    pub fn push(&self, packet: Vec<u8>) -> Vec<Vec<u8>> {
+        self.lock().push(&packet)
+    }
+
+    pub fn frames(&self) -> u64 {
+        self.lock().frames()
+    }
+
+    /// Datagrams that were not RTP, or payloads that would not unpack.
+    pub fn errors(&self) -> u64 {
+        self.lock().errors()
+    }
+}
+
+impl GlassesAacDepacketizer {
+    fn lock(&self) -> std::sync::MutexGuard<'_, aac::Depacketizer> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+// =======================================================================================
+// Timing (§12, §10, §3) — src/timing.rs
+// =======================================================================================
+
+/// One named duration, in milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiGlassesTiming {
+    pub name: String,
+    pub millis: u64,
+}
+
+/// Every recommended duration, as `(name, ms)`.
+///
+/// A binding that renders these must not present them as one kind: some are measurements of
+/// what the device does and some are policy the client chose. The names match
+/// [`crate::timing::ALL`], and that module's doc comments say which is which.
+#[uniffi::export]
+pub fn glasses_timings() -> Vec<FfiGlassesTiming> {
+    timing::ALL
+        .iter()
+        .map(|(name, d)| FfiGlassesTiming {
+            name: (*name).to_string(),
+            millis: d.as_millis() as u64,
+        })
+        .collect()
+}
+
+/// Wait this long AFTER the `0x25` SSID push before joining the AP. The access point is not
+/// accepting associations at the moment the SSID lands.
+#[uniffi::export]
+pub fn glasses_timing_ssid_settle_ms() -> u64 {
+    timing::SSID_SETTLE.as_millis() as u64
+}
+
+/// How long after the `0x39`/`0x67` acknowledgement the SSID push arrives.
+#[uniffi::export]
+pub fn glasses_timing_ssid_arrival_ms() -> u64 {
+    timing::SSID_ARRIVAL_TYPICAL.as_millis() as u64
+}
+
+/// No `0x46` for this long means the user stopped talking. Client policy — the firmware defines
+/// no end of utterance.
+#[uniffi::export]
+pub fn glasses_timing_voice_idle_gap_ms() -> u64 {
+    timing::VOICE_IDLE_GAP.as_millis() as u64
+}
+
+/// The backstop on one capture. The microphone stays open until `0x56` is written.
+#[uniffi::export]
+pub fn glasses_timing_voice_hard_cap_ms() -> u64 {
+    timing::VOICE_HARD_CAP.as_millis() as u64
+}
+
+/// The gap between the two `0x56` writes that close the microphone.
+#[uniffi::export]
+pub fn glasses_timing_voice_interrupt_repeat_gap_ms() -> u64 {
+    timing::VOICE_INTERRUPT_REPEAT_GAP.as_millis() as u64
+}
+
+/// Lower bound of the `0x17` battery poll. Battery also arrives unsolicited on `0x53`.
+#[uniffi::export]
+pub fn glasses_timing_battery_poll_min_ms() -> u64 {
+    timing::BATTERY_POLL_MIN.as_millis() as u64
+}
+
+/// Upper bound of the battery poll.
+#[uniffi::export]
+pub fn glasses_timing_battery_poll_max_ms() -> u64 {
+    timing::BATTERY_POLL_MAX.as_millis() as u64
+}
+
+/// How often to re-read `{0x45, 0x48, 0x69, 0x95}`. They change from the device's own touchpad
+/// with no push to say so.
+#[uniffi::export]
+pub fn glasses_timing_state_refresh_ms() -> u64 {
+    timing::STATE_REFRESH.as_millis() as u64
+}
+
+/// How long to let the OS try to join the SoftAP before calling it failed.
+#[uniffi::export]
+pub fn glasses_timing_wifi_join_timeout_ms() -> u64 {
+    timing::WIFI_JOIN_TIMEOUT.as_millis() as u64
+}
+
+/// How long after the link comes up the unsolicited `0x95` capabilities frame arrives — which is
+/// why both notify characteristics must be subscribed before the first write.
+#[uniffi::export]
+pub fn glasses_timing_capabilities_push_delay_ms() -> u64 {
+    timing::CAPABILITIES_PUSH_DELAY.as_millis() as u64
+}
+
+/// How long a `52 58` transfer may go silent before the client resets the reassembler. A CHOICE,
+/// not a wire fact — the reassembler has no clock and cannot notice this itself.
+#[uniffi::export]
+pub fn glasses_timing_file_stream_stall_ms() -> u64 {
+    timing::FILE_STREAM_STALL.as_millis() as u64
+}
+
+/// A photo, from `0x22` to the last byte of its AI image.
+#[uniffi::export]
+pub fn glasses_timing_photo_capture_ms() -> u64 {
+    timing::PHOTO_CAPTURE_TYPICAL.as_millis() as u64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2122,7 +3280,10 @@ mod tests {
             (0x61, vec![b'0']),
         ];
         for (cmd, data) in &burst {
-            assert!(!p.switch_states().is_complete, "not complete until the last frame");
+            assert!(
+                !p.switch_states().is_complete,
+                "not complete until the last frame"
+            );
             p.push(encode_device(*cmd, data));
         }
         let s = p.switch_states();
@@ -2152,7 +3313,10 @@ mod tests {
         assert_eq!(order.len(), 10);
         assert!(!order.contains(&FfiGlassesCommand::GetSwitchStates));
         assert_eq!(
-            order.iter().filter(|c| glasses_command_code(**c) >= 0x07 && glasses_command_code(**c) <= 0x11).count(),
+            order
+                .iter()
+                .filter(|c| glasses_command_code(**c) >= 0x07 && glasses_command_code(**c) <= 0x11)
+                .count(),
             5,
             "the five gesture slots are in the burst"
         );
@@ -2177,7 +3341,10 @@ mod tests {
             }]
         );
         let FfiGlassesResidual::Foreign { bytes } = parsed.residual else {
-            panic!("the 52 58 stream must come back, not be dropped: {:?}", parsed.residual);
+            panic!(
+                "the 52 58 stream must come back, not be dropped: {:?}",
+                parsed.residual
+            );
         };
         assert_eq!(
             files.push(bytes),
@@ -2187,7 +3354,10 @@ mod tests {
             }]
         );
 
-        files.push(glasses_encode_file_frame(0x98, vec![0, 0, 0, 0, 1, 2, 3, 4]));
+        files.push(glasses_encode_file_frame(
+            0x98,
+            vec![0, 0, 0, 0, 1, 2, 3, 4],
+        ));
         assert_eq!(
             files.push(glasses_encode_file_frame(0x99, vec![0x00])),
             vec![FfiGlassesFileEvent::Completed {
@@ -2278,7 +3448,10 @@ mod tests {
             FfiGlassesDeviceAction::ShakeHead,
             FfiGlassesDeviceAction::WearingDetection,
         ] {
-            assert_eq!(glasses_device_action_evidence(a), FfiGlassesEvidence::ClientOnly);
+            assert_eq!(
+                glasses_device_action_evidence(a),
+                FfiGlassesEvidence::ClientOnly
+            );
         }
         assert_eq!(
             glasses_device_action_evidence(FfiGlassesDeviceAction::ImportingMode),
@@ -2296,7 +3469,11 @@ mod tests {
             let code = glasses_command_code(cmd);
             assert_eq!(glasses_command_from_code(code), Some(cmd));
         }
-        assert_eq!(glasses_command_from_code(0xEE), None, "an unknown byte is a real answer");
+        assert_eq!(
+            glasses_command_from_code(0xEE),
+            None,
+            "an unknown byte is a real answer"
+        );
     }
 
     #[test]
@@ -2331,7 +3508,10 @@ mod tests {
         assert_eq!(g.service, "AA12");
         assert_eq!(g.write, "AA13");
         assert_eq!(g.notify_all, vec!["AA14", "AA15"]);
-        assert!(g.write_with_response, "every captured write is an ATT Write Request");
+        assert!(
+            g.write_with_response,
+            "every captured write is an ATT Write Request"
+        );
         assert!(glasses_is_drivable(vec!["AA13".into(), "AA14".into()]));
         assert!(!glasses_is_drivable(vec!["AA14".into(), "AA15".into()]));
     }
@@ -2389,7 +3569,10 @@ mod tests {
                 let p = GlassesParser::new();
                 p.push(encode_device(frame.cmd, &frame.data));
                 let s = p.switch_states();
-                let i = glasses_gesture_slots().iter().position(|x| *x == slot).unwrap();
+                let i = glasses_gesture_slots()
+                    .iter()
+                    .position(|x| *x == slot)
+                    .unwrap();
                 assert_eq!(s.gestures[i], Some(action));
                 assert_eq!(s.gestures_raw[i], Some(wire));
             }
@@ -2410,7 +3593,10 @@ mod tests {
             ]
         );
         assert_eq!(
-            channels.iter().map(|c| glasses_volume_channel_code(*c)).collect::<Vec<_>>(),
+            channels
+                .iter()
+                .map(|c| glasses_volume_channel_code(*c))
+                .collect::<Vec<_>>(),
             vec![0x00, 0x01, 0x02]
         );
 
@@ -2435,11 +3621,458 @@ mod tests {
     #[test]
     fn the_standalone_accumulator_matches_the_parsers() {
         let s = GlassesSwitchStates::new();
-        assert!(s.ingest_frame(0x01, vec![b'2']), "a settings frame is consumed");
-        assert!(!s.ingest_frame(0x53, vec![0x01, 0x40]), "a battery push is not");
+        assert!(
+            s.ingest_frame(0x01, vec![b'2']),
+            "a settings frame is consumed"
+        );
+        assert!(
+            !s.ingest_frame(0x53, vec![0x01, 0x40]),
+            "a battery push is not"
+        );
         assert_eq!(s.snapshot().led, Some(2));
         assert!(!s.is_complete());
         s.reset();
         assert_eq!(s.snapshot().led, None);
+    }
+
+    // -- the Wi-Fi file API (§13) -------------------------------------------------------
+
+    /// The listing from a live session, crossing the boundary intact.
+    #[test]
+    fn a_real_file_listing_crosses_the_boundary_as_typed_rows() {
+        let json = concat!(
+            r#"{"result":0,"info":[{"folder":"EVENT","files":["#,
+            r#"{"name":"EVENT/20260727223717716.jpg","size":313,"createtimestr":"20260727223716","type":1}"#,
+            r#"],"count":4},{"folder":"AAC","files":[],"count":0},"#,
+            r#"{"folder":"LOOP","files":[],"count":0},{"folder":"EMR","files":[],"count":0}]}"#,
+        );
+        let FfiGlassesFileListResult::Ok { list } = glasses_wifi_parse_file_list(json.into())
+        else {
+            panic!("a listing")
+        };
+        assert_eq!(list.result, 0);
+        assert_eq!(list.total_files, 1);
+        assert_eq!(list.folders.len(), 4);
+        let row = &list.folders[0].files[0];
+        assert_eq!(row.folder, FfiGlassesFolder::Event);
+        assert_eq!(row.kind, FfiGlassesMediaKind::Photo);
+        assert_eq!(row.basename, "20260727223717716.jpg");
+        assert_eq!(row.size_kib, 313);
+        // The rule stated on the row, so a binding does not have to remember it.
+        assert_eq!((row.min_bytes, row.max_bytes), (320_512, 321_535));
+        assert_eq!(
+            row.created,
+            Some(FfiGlassesTimestamp {
+                year: 2026,
+                month: 7,
+                day: 27,
+                hour: 22,
+                minute: 37,
+                second: 16
+            })
+        );
+        assert_eq!(
+            list.folders[0].count, 4,
+            "the device's own count crosses raw"
+        );
+    }
+
+    /// The failure a wrong network actually produces, and the one an unknown firmware would.
+    #[test]
+    fn a_listing_that_is_not_one_crosses_as_a_typed_reason_and_not_an_empty_list() {
+        assert!(matches!(
+            glasses_wifi_parse_file_list("<html>404</html>".into()),
+            FfiGlassesFileListResult::Err {
+                reason: FfiGlassesWifiParseError::NotJson { at: 0 }
+            }
+        ));
+        assert!(matches!(
+            glasses_wifi_parse_file_list(
+                r#"{"result":0,"info":[{"folder":"X","files":[]}]}"#.into()
+            ),
+            FfiGlassesFileListResult::Err {
+                reason: FfiGlassesWifiParseError::UnknownFolder { .. }
+            }
+        ));
+        assert!(matches!(
+            glasses_wifi_parse_file_list(r#"{"result":0,"info":["#.into()),
+            FfiGlassesFileListResult::Err {
+                reason: FfiGlassesWifiParseError::Truncated
+            }
+        ));
+    }
+
+    #[test]
+    fn the_delete_reply_crosses_with_its_success_already_decided() {
+        let FfiGlassesDeleteReplyResult::Ok { reply } =
+            glasses_wifi_parse_delete_reply(r#"{"result":0,"info":"success."}"#.into())
+        else {
+            panic!("a reply")
+        };
+        assert_eq!(reply.result, 0);
+        assert_eq!(reply.info, "success.");
+        assert!(reply.success);
+    }
+
+    /// The four downloads from one live session, against their four listed sizes.
+    #[test]
+    fn the_kib_completeness_rule_crosses_the_boundary_intact() {
+        for (kib, bytes) in [
+            (313u64, 320_900u64),
+            (338, 346_328),
+            (289, 296_340),
+            (270, 277_308),
+        ] {
+            assert!(glasses_wifi_download_is_complete(kib, bytes));
+            assert!(
+                !glasses_wifi_download_is_complete(kib, kib),
+                "size is KiB, not bytes"
+            );
+        }
+        assert_eq!(
+            glasses_wifi_expected_byte_range(313),
+            FfiGlassesByteRange {
+                min: 320_512,
+                max: 321_535
+            }
+        );
+    }
+
+    #[test]
+    fn the_url_builders_produce_the_paths_the_firmware_serves() {
+        assert_eq!(glasses_wifi_host(), "192.168.169.1");
+        assert_eq!(glasses_wifi_phone_address(), "192.168.169.100");
+        assert_eq!(glasses_wifi_base_url(), "http://192.168.169.1");
+        assert_eq!(
+            glasses_wifi_list_url(),
+            "http://192.168.169.1/app/getfilelist"
+        );
+        let name = "EVENT/20260727223716.jpg".to_string();
+        assert_eq!(
+            glasses_wifi_thumbnail_url(name.clone()),
+            "http://192.168.169.1/app/getthumbnail?file=EVENT/20260727223716.jpg"
+        );
+        assert_eq!(
+            glasses_wifi_download_url(name.clone()),
+            "http://192.168.169.1/EVENT/20260727223716.jpg"
+        );
+        assert_eq!(
+            glasses_wifi_delete_url(name),
+            "http://192.168.169.1/app/deletefile?file=EVENT/20260727223716.jpg"
+        );
+        assert_eq!(glasses_wifi_folders().len(), 4);
+        assert_eq!(glasses_wifi_folder_name(FfiGlassesFolder::Event), "EVENT");
+        assert_eq!(
+            glasses_wifi_folder_holds(FfiGlassesFolder::Aac),
+            FfiGlassesMediaKind::VoiceRecording
+        );
+    }
+
+    #[test]
+    fn the_sync_plan_crosses_with_every_url_already_built() {
+        let json = concat!(
+            r#"{"result":0,"info":[{"folder":"EVENT","count":1,"files":["#,
+            r#"{"name":"EVENT/a.jpg","size":2,"createtimestr":"20260727223716","type":1}]}]}"#,
+        );
+        let plan = glasses_wifi_sync_plan(json.into(), true);
+        assert_eq!(plan.len(), 5);
+        assert!(matches!(plan[0], FfiGlassesSyncStep::List { .. }));
+        assert!(matches!(plan[1], FfiGlassesSyncStep::Thumbnail { .. }));
+        match &plan[2] {
+            FfiGlassesSyncStep::Download {
+                url,
+                min_bytes,
+                max_bytes,
+                ..
+            } => {
+                assert_eq!(url, "http://192.168.169.1/EVENT/a.jpg");
+                assert_eq!((*min_bytes, *max_bytes), (2048, 3071));
+            }
+            other => panic!("expected a download, got {other:?}"),
+        }
+        assert!(matches!(plan[3], FfiGlassesSyncStep::Delete { .. }));
+        assert_eq!(plan[4], FfiGlassesSyncStep::TearDown, "never forget 0x44");
+        // Garbage in produces an empty plan rather than a plan that does the wrong thing.
+        assert!(glasses_wifi_sync_plan("nope".into(), true).is_empty());
+    }
+
+    // -- live view (§14) ----------------------------------------------------------------
+
+    /// The DESCRIBE body verbatim from a live session.
+    const LIVE_SDP: &str = concat!(
+        "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=Test\r\na=type:broadcast\r\nt=0 0\r\n",
+        "c=IN IP4 0.0.0.0\r\n",
+        "m=video 0 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=decode_buf=300\r\na=control:track0\r\n",
+        "m=audio 0 RTP/AVP 97\r\na=rtpmap:97 mpeg4-generic/16000/1\r\n",
+        "a=fmtp:97 profile-level-id=1; mode=AAC-hbr; config=1408; sizeLength=13; ",
+        "indexlength=3; indexdeltalength=3\r\na=control:track1\r\n",
+    );
+
+    #[test]
+    fn the_live_describe_body_crosses_as_two_tracks_with_their_control_suffixes() {
+        let FfiGlassesSdpResult::Ok { sdp } = glasses_parse_sdp(LIVE_SDP.into()) else {
+            panic!("an SDP document")
+        };
+        assert_eq!(sdp.session_name.as_deref(), Some("Test"));
+        assert_eq!(sdp.media.len(), 2);
+
+        let v = &sdp.media[0];
+        assert_eq!(v.kind, "video");
+        assert_eq!(v.payload_type, 96);
+        assert_eq!(v.control.as_deref(), Some("track0"));
+        assert_eq!(v.rtpmap.as_ref().unwrap().encoding, "H264");
+        assert_eq!(v.rtpmap.as_ref().unwrap().clock_rate, 90_000);
+        assert!(v.sprop_nal_units.is_empty(), "SPS/PPS are in-band here");
+
+        let a = &sdp.media[1];
+        assert_eq!(a.kind, "audio");
+        assert_eq!(a.payload_type, 97);
+        assert_eq!(a.control.as_deref(), Some("track1"));
+        // The keys cross as SENT — lower case on two of the three RFC 3640 widths.
+        assert!(a
+            .fmtp
+            .iter()
+            .any(|kv| kv.key == "indexlength" && kv.value == "3"));
+        assert!(a
+            .fmtp
+            .iter()
+            .any(|kv| kv.key == "config" && kv.value == "1408"));
+    }
+
+    #[test]
+    fn an_sdp_that_is_not_one_crosses_as_a_reason() {
+        assert!(matches!(
+            glasses_parse_sdp("<html>".into()),
+            FfiGlassesSdpResult::Err { .. }
+        ));
+    }
+
+    /// The whole live RTSP exchange, driven from the FFI object. Every response byte below was
+    /// cut from a session with the glasses.
+    #[test]
+    fn the_rtsp_object_replays_the_live_exchange_to_playing() {
+        let s = GlassesRtspSession::new();
+        assert_eq!(s.state(), FfiGlassesRtspState::Init);
+
+        let options = s.next_request().expect("OPTIONS");
+        assert!(String::from_utf8_lossy(&options)
+            .starts_with("OPTIONS rtsp://192.168.169.1:554/h264 RTSP/1.0\r\nCSeq: 1"));
+
+        let FfiGlassesRtspFeed::Ok { events } = s.feed(
+            b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nPublic: DESCRIBE, SETUP, TEARDOWN, PLAY, PAUSE\r\n\r\n"
+                .to_vec(),
+        ) else {
+            panic!("an OPTIONS reply")
+        };
+        assert!(matches!(
+            events.as_slice(),
+            [FfiGlassesRtspEvent::Options { .. }]
+        ));
+
+        s.pending_request().expect("DESCRIBE");
+        let describe = format!(
+            "RTSP/1.0 200 OK\r\nCSeq: 2\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{}",
+            LIVE_SDP.len(),
+            LIVE_SDP
+        );
+        let FfiGlassesRtspFeed::Ok { events } = s.feed(describe.into_bytes()) else {
+            panic!("a DESCRIBE reply")
+        };
+        assert!(matches!(
+            events.as_slice(),
+            [FfiGlassesRtspEvent::Described { .. }]
+        ));
+        assert_eq!(s.sdp().unwrap().media.len(), 2);
+
+        let setup = s.pending_request().expect("SETUP");
+        assert!(String::from_utf8_lossy(&setup).contains("/h264/track0"));
+        assert!(String::from_utf8_lossy(&setup).contains("client_port=8712-8713"));
+
+        let FfiGlassesRtspFeed::Ok { events } = s.feed(
+            concat!(
+                "RTSP/1.0 200 OK\r\nCSeq: 3\r\n",
+                "Transport: RTP/AVP;unicast;client_port=8712-8713;server_port=53796-53797\r\n",
+                "Session: 82838485868788898A8B8C8D8E8F90\r\n\r\n"
+            )
+            .as_bytes()
+            .to_vec(),
+        ) else {
+            panic!("a SETUP reply")
+        };
+        assert_eq!(
+            events,
+            vec![FfiGlassesRtspEvent::SetUp {
+                track: FfiGlassesTrack::Video,
+                server_rtp_port: Some(53_796),
+                server_rtcp_port: Some(53_797),
+                session_id: "82838485868788898A8B8C8D8E8F90".into(),
+            }]
+        );
+        assert_eq!(s.video_server_port(), Some(53_796));
+        assert_eq!(s.video_client_port(), 8712);
+
+        let play = s.pending_request().expect("PLAY");
+        assert!(String::from_utf8_lossy(&play).contains("Session: 82838485868788898A8B8C8D8E8F90"));
+        let FfiGlassesRtspFeed::Ok { events } = s.feed(
+            b"RTSP/1.0 200 OK\r\nCSeq: 4\r\nSession: 82838485868788898A8B8C8D8E8F90\r\n\r\n"
+                .to_vec(),
+        ) else {
+            panic!("a PLAY reply")
+        };
+        assert_eq!(events, vec![FfiGlassesRtspEvent::Playing]);
+        assert!(s.is_playing());
+        assert_eq!(s.state(), FfiGlassesRtspState::Playing);
+
+        assert!(String::from_utf8_lossy(&s.teardown()).starts_with("TEARDOWN "));
+        assert_eq!(s.state(), FfiGlassesRtspState::AwaitingTeardown);
+    }
+
+    #[test]
+    fn an_rtsp_failure_crosses_as_a_reason_rather_than_a_panic() {
+        let s = GlassesRtspSession::new();
+        s.next_request();
+        assert!(matches!(
+            s.feed(b"HTTP/1.1 200 OK\r\n\r\n".to_vec()),
+            FfiGlassesRtspFeed::Err { .. }
+        ));
+    }
+
+    /// A real keyframe: the STAP-A carrying SPS+PPS, then the IDR in FU-A fragments. Cut from a
+    /// live session; the fragment bodies are truncated to keep the vectors readable.
+    #[test]
+    fn a_real_keyframe_crosses_the_boundary_as_one_annex_b_access_unit() {
+        let stap_a: Vec<u8> = vec![
+            0x80, 0x60, 0x81, 0x80, 0x00, 0x1A, 0x9E, 0x50, 0x7B, 0x7A, 0x79, 0x78, 0x78, 0x00,
+            0x0C, 0x67, 0x4D, 0x00, 0x34, 0x96, 0x54, 0x03, 0x20, 0x12, 0xF4, 0x88, 0x08, 0x00,
+            0x04, 0x68, 0xEE, 0x38, 0x80,
+        ];
+        let fu_start: Vec<u8> = vec![
+            0x80, 0x60, 0x81, 0x81, 0x00, 0x1A, 0x9E, 0x50, 0x7B, 0x7A, 0x79, 0x78, 0x7C, 0x85,
+            0xB8, 0x04, 0x00, 0xFF, 0xFD, 0xE6, 0x0D, 0x27,
+        ];
+        let fu_end: Vec<u8> = vec![
+            0x80, 0xE0, 0x81, 0xAC, 0x00, 0x1A, 0x9E, 0x50, 0x7B, 0x7A, 0x79, 0x78, 0x7C, 0x45,
+            0xF5, 0x35, 0xE9, 0xA3, 0xC4, 0xB4, 0x57, 0x6F,
+        ];
+
+        let d = GlassesH264Depacketizer::new();
+        assert!(d.push(stap_a).is_empty(), "no marker yet");
+        assert!(d.push(fu_start).is_empty());
+        assert!(!d.keyframe_seen());
+
+        let units = d.push_detailed(fu_end);
+        assert_eq!(units.len(), 1);
+        let au = &units[0];
+        assert_eq!(au.timestamp, 1_744_464);
+        assert_eq!(au.nal_types, vec![7, 8, 5], "SPS, PPS, IDR");
+        assert!(au.is_keyframe);
+        assert!(au.is_decodable_start, "a recorder may start here");
+        assert!(au.closed_by_marker);
+        assert_eq!(&au.data[..4], glasses_h264_start_code().as_slice());
+        assert_eq!(glasses_h264_nal_type(au.data[4]), 7);
+        assert!(d.keyframe_seen());
+        assert_eq!(d.stats().keyframes, 1);
+        assert_eq!(d.stats().dropped_fragments, 0);
+        assert_eq!(d.parameter_sets().len(), 4 + 12 + 4 + 4);
+    }
+
+    #[test]
+    fn the_rtp_header_crosses_with_the_fields_a_depacketiser_needs() {
+        let stap_a: Vec<u8> = vec![
+            0x80, 0x60, 0x81, 0x80, 0x00, 0x1A, 0x9E, 0x50, 0x7B, 0x7A, 0x79, 0x78, 0x78, 0x00,
+            0x0C, 0x67,
+        ];
+        let FfiGlassesRtpParsed::Ok { header } = glasses_parse_rtp(stap_a) else {
+            panic!("an RTP packet")
+        };
+        assert_eq!(header.payload_type, 96);
+        assert_eq!(header.sequence, 33_152);
+        assert_eq!(header.timestamp, 1_744_464);
+        assert_eq!(header.ssrc, 0x7B7A_7978);
+        assert!(!header.marker);
+        assert_eq!(header.payload_offset, 12);
+        assert!(matches!(
+            glasses_parse_rtp(b"nope".to_vec()),
+            FfiGlassesRtpParsed::Err
+        ));
+    }
+
+    /// `config=1408` from the live SDP, and the ADTS header that makes the frames playable.
+    #[test]
+    fn the_aac_config_and_adts_header_agree_with_the_sdp() {
+        let c = glasses_aac_config();
+        assert_eq!(c.object_type, 2, "AAC-LC");
+        assert_eq!(c.sample_rate_hz, 16_000);
+        assert_eq!(c.channel_configuration, 1);
+        assert_eq!(glasses_aac_parse_config("1408".into()), Some(c));
+        assert_eq!(glasses_aac_parse_config("zz".into()), None);
+
+        let h = glasses_adts_header(100);
+        assert_eq!(h.len(), 7);
+        assert_eq!(h[0], 0xFF);
+        assert_eq!(h[1], 0xF1);
+        // The length in the header counts the header: 100 + 7.
+        let len = ((h[3] as usize & 0x03) << 11) | ((h[4] as usize) << 3) | (h[5] as usize >> 5);
+        assert_eq!(len, 107);
+        assert!(
+            glasses_adts_header(1 << 20).is_empty(),
+            "a frame too big for the 13-bit field"
+        );
+    }
+
+    /// Built to RFC 3640 — no capture contains an audio RTP packet, because every live session
+    /// set up track0 only.
+    #[test]
+    fn the_aac_depacketiser_splits_a_packet_at_its_declared_au_sizes() {
+        let d = GlassesAacDepacketizer::new();
+        let mut pkt = vec![
+            0x80, 0xE1, 0x00, 0x0A, 0x00, 0x00, 0x04, 0x00, 0x11, 0x22, 0x33, 0x44,
+        ];
+        pkt.extend_from_slice(&[0x00, 0x20]); // 32 BITS of AU headers, i.e. two of them
+        pkt.extend_from_slice(&[0x00, 0x18]); // size 3, index 0
+        pkt.extend_from_slice(&[0x00, 0x29]); // size 5, delta 1
+        pkt.extend_from_slice(&[1, 2, 3]);
+        pkt.extend_from_slice(&[4, 4, 4, 4, 4]);
+        let frames = d.push(pkt);
+        assert_eq!(frames, vec![vec![1, 2, 3], vec![4, 4, 4, 4, 4]]);
+        assert_eq!(d.frames(), 2);
+        assert_eq!(d.errors(), 0);
+
+        assert!(d.push(b"not rtp".to_vec()).is_empty());
+        assert_eq!(d.errors(), 1);
+
+        let wide = GlassesAacDepacketizer::with_widths(13, 3, 3);
+        assert_eq!(wide.frames(), 0);
+    }
+
+    // -- timing (§3, §10, §12) ----------------------------------------------------------
+
+    #[test]
+    fn every_timing_constant_crosses_as_milliseconds_and_matches_its_table_row() {
+        assert_eq!(glasses_timing_ssid_settle_ms(), 2_000);
+        assert_eq!(glasses_timing_ssid_arrival_ms(), 2_500);
+        assert_eq!(glasses_timing_voice_idle_gap_ms(), 1_200);
+        assert_eq!(glasses_timing_voice_hard_cap_ms(), 30_000);
+        assert_eq!(glasses_timing_voice_interrupt_repeat_gap_ms(), 500);
+        assert_eq!(glasses_timing_battery_poll_min_ms(), 5_000);
+        assert_eq!(glasses_timing_battery_poll_max_ms(), 10_000);
+        assert_eq!(glasses_timing_state_refresh_ms(), 30_000);
+        assert_eq!(glasses_timing_wifi_join_timeout_ms(), 25_000);
+        assert_eq!(glasses_timing_capabilities_push_delay_ms(), 30);
+        assert_eq!(glasses_timing_file_stream_stall_ms(), 5_000);
+        assert_eq!(glasses_timing_photo_capture_ms(), 3_200);
+
+        let table = glasses_timings();
+        assert_eq!(table.len(), timing::ALL.len());
+        let by_name = |n: &str| table.iter().find(|t| t.name == n).map(|t| t.millis);
+        assert_eq!(
+            by_name("ssid_settle"),
+            Some(glasses_timing_ssid_settle_ms())
+        );
+        assert_eq!(
+            by_name("voice_idle_gap"),
+            Some(glasses_timing_voice_idle_gap_ms())
+        );
+        assert_eq!(by_name("file_stream_stall"), Some(5_000));
     }
 }

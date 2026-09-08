@@ -762,7 +762,9 @@ fn record_duration(d: &[u8]) -> DeviceEvent {
     if d.len() < 2 {
         return too_short(op::RECORD_DURATION, d, 2);
     }
-    DeviceEvent::Switch(SwitchReport::RecordSeconds(u16::from_be_bytes([d[0], d[1]])))
+    DeviceEvent::Switch(SwitchReport::RecordSeconds(u16::from_be_bytes([
+        d[0], d[1],
+    ])))
 }
 
 fn switch_flag(d: &[u8], make: fn(bool) -> SwitchReport, cmd: u8) -> DeviceEvent {
@@ -964,7 +966,11 @@ impl Parser {
     /// forever. [`EndCause::IdleTimeout`] and [`EndCause::Disconnected`] are the shell's
     /// other two reasons; the DURATION behind the first is the shell's alone.
     pub fn close_voice(&mut self, cause: EndCause) -> Vec<DeviceEvent> {
-        self.voice.close(cause).into_iter().map(DeviceEvent::Voice).collect()
+        self.voice
+            .close(cause)
+            .into_iter()
+            .map(DeviceEvent::Voice)
+            .collect()
     }
 
     /// Forget the frame buffer and the capture state. The shell calls this on disconnect,
@@ -1148,7 +1154,10 @@ mod tests {
 
     fn hex(s: &str) -> Vec<u8> {
         let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-        assert!(s.len().is_multiple_of(2), "hex literal must be byte-aligned");
+        assert!(
+            s.len().is_multiple_of(2),
+            "hex literal must be byte-aligned"
+        );
         (0..s.len() / 2)
             .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).expect("valid hex"))
             .collect()
@@ -1189,10 +1198,34 @@ mod tests {
         // (0x17 read-reply frame, 0x53 push frame, percent, charging, capture) — every
         // string below is verbatim from a capture, both columns.
         let pairs: &[(&str, &str, u8, bool, &str)] = &[
-            ("ac5500051734390185", "ac55000453013185", 49, true, "eyevue_1"),
-            ("ac550005173530017d", "ac55000453013286", 50, true, "eyevue_1"),
-            ("ac5500051736340182", "ac55000453014094", 64, true, "eyevue_2"),
-            ("ac550005173232007b", "ac55000453001669", 22, false, "glassx_1"),
+            (
+                "ac5500051734390185",
+                "ac55000453013185",
+                49,
+                true,
+                "eyevue_1",
+            ),
+            (
+                "ac550005173530017d",
+                "ac55000453013286",
+                50,
+                true,
+                "eyevue_1",
+            ),
+            (
+                "ac5500051736340182",
+                "ac55000453014094",
+                64,
+                true,
+                "eyevue_2",
+            ),
+            (
+                "ac550005173232007b",
+                "ac55000453001669",
+                22,
+                false,
+                "glassx_1",
+            ),
         ];
         for (read, push, percent, charging, capture) in pairs {
             let r = battery(event(read));
@@ -1435,7 +1468,10 @@ mod tests {
         // A NUL-padded variant — which no capture holds — decodes to the same SSID, which
         // is the entire reason the defensive cleaning is kept.
         let padded = encode_device(op::WIFI_NAME, b"DH-TwI-4641E4\0\0\0");
-        assert_eq!(parse(&decode_device(&padded).unwrap()), DeviceEvent::WifiCredentials(w));
+        assert_eq!(
+            parse(&decode_device(&padded).unwrap()),
+            DeviceEvent::WifiCredentials(w)
+        );
     }
 
     #[test]
@@ -1548,7 +1584,10 @@ mod tests {
         // Index 9 is file-import mode, not "Wi-Fi active" — the last byte of the frame,
         // and the one a nine-byte reading of the PDF loses entirely.
         assert_eq!(DeviceAction::ImportingMode.index(), 9);
-        assert_eq!(DeviceAction::from_index(9), Some(DeviceAction::ImportingMode));
+        assert_eq!(
+            DeviceAction::from_index(9),
+            Some(DeviceAction::ImportingMode)
+        );
         assert_eq!(DeviceAction::from_index(10), None);
     }
 
@@ -1595,7 +1634,10 @@ mod tests {
         let events = parser.push(&blob);
         assert_eq!(events.len(), 10, "the burst is ten frames");
         for e in &events {
-            assert!(states.ingest(e), "every burst frame is a settings frame: {e:?}");
+            assert!(
+                states.ingest(e),
+                "every burst frame is a settings frame: {e:?}"
+            );
         }
 
         assert_eq!(states.led(), Some(1));
@@ -1603,14 +1645,31 @@ mod tests {
         assert_eq!(states.wear_detection(), Some(true));
         assert_eq!(states.voice_command(), Some(true));
         assert_eq!(states.orientation(), Some(Orientation::Portrait));
-        assert_eq!(states.gesture(GestureSlot::SwipeForward), Some(GestureAction::VolumeDown));
-        assert_eq!(states.gesture(GestureSlot::SwipeBack), Some(GestureAction::VolumeUp));
-        assert_eq!(states.gesture(GestureSlot::SingleTap), Some(GestureAction::PlayPause));
-        assert_eq!(states.gesture(GestureSlot::DoubleTap), Some(GestureAction::PreviousTrack));
-        assert_eq!(states.gesture(GestureSlot::TripleTap), Some(GestureAction::NextTrack));
+        assert_eq!(
+            states.gesture(GestureSlot::SwipeForward),
+            Some(GestureAction::VolumeDown)
+        );
+        assert_eq!(
+            states.gesture(GestureSlot::SwipeBack),
+            Some(GestureAction::VolumeUp)
+        );
+        assert_eq!(
+            states.gesture(GestureSlot::SingleTap),
+            Some(GestureAction::PlayPause)
+        );
+        assert_eq!(
+            states.gesture(GestureSlot::DoubleTap),
+            Some(GestureAction::PreviousTrack)
+        );
+        assert_eq!(
+            states.gesture(GestureSlot::TripleTap),
+            Some(GestureAction::NextTrack)
+        );
         assert!(states.is_complete());
         // No frame in the burst is keyed 0x48 — the request opcode never comes back.
-        assert!(!blob.windows(5).any(|w| w[0] == 0xAC && w[1] == 0x55 && w[4] == 0x48));
+        assert!(!blob
+            .windows(5)
+            .any(|w| w[0] == 0xAC && w[1] == 0x55 && w[4] == 0x48));
     }
 
     /// Completeness counts the gestures, which is where this diverges from the iOS
@@ -1642,11 +1701,31 @@ mod tests {
     #[test]
     fn the_five_gesture_frames_decode_and_are_exactly_the_android_gap() {
         let cases: [(&str, GestureSlot, GestureAction); 5] = [
-            ("ac550003073037", GestureSlot::SwipeForward, GestureAction::VolumeDown),
-            ("ac550003083139", GestureSlot::SwipeBack, GestureAction::VolumeUp),
-            ("ac55000309323b", GestureSlot::SingleTap, GestureAction::PlayPause),
-            ("ac550003103444", GestureSlot::DoubleTap, GestureAction::PreviousTrack),
-            ("ac550003113344", GestureSlot::TripleTap, GestureAction::NextTrack),
+            (
+                "ac550003073037",
+                GestureSlot::SwipeForward,
+                GestureAction::VolumeDown,
+            ),
+            (
+                "ac550003083139",
+                GestureSlot::SwipeBack,
+                GestureAction::VolumeUp,
+            ),
+            (
+                "ac55000309323b",
+                GestureSlot::SingleTap,
+                GestureAction::PlayPause,
+            ),
+            (
+                "ac550003103444",
+                GestureSlot::DoubleTap,
+                GestureAction::PreviousTrack,
+            ),
+            (
+                "ac550003113344",
+                GestureSlot::TripleTap,
+                GestureAction::NextTrack,
+            ),
         ];
         for (h, slot, action) in cases {
             assert_eq!(
@@ -1688,9 +1767,18 @@ mod tests {
     /// The feature is dead (no client drives it) but the frame is real and in every burst.
     #[test]
     fn all_three_captured_led_levels_decode_and_a_fourth_is_out_of_range() {
-        assert_eq!(event("ac550003013031"), DeviceEvent::Switch(SwitchReport::Led(0)));
-        assert_eq!(event("ac550003013132"), DeviceEvent::Switch(SwitchReport::Led(1)));
-        assert_eq!(event("ac550003013233"), DeviceEvent::Switch(SwitchReport::Led(2)));
+        assert_eq!(
+            event("ac550003013031"),
+            DeviceEvent::Switch(SwitchReport::Led(0))
+        );
+        assert_eq!(
+            event("ac550003013132"),
+            DeviceEvent::Switch(SwitchReport::Led(1))
+        );
+        assert_eq!(
+            event("ac550003013233"),
+            DeviceEvent::Switch(SwitchReport::Led(2))
+        );
         let bytes = encode_device(op::LED, b"3");
         assert!(matches!(
             parse(&decode_device(&bytes).unwrap()),
@@ -1796,14 +1884,24 @@ mod tests {
         let [DeviceEvent::Voice(VoiceEvent::Packet(p))] = events.as_slice() else {
             panic!("expected one packet, got {events:?}");
         };
-        assert_eq!(p.payload.len(), 40, "every captured voice payload is 40 bytes");
-        assert_eq!(p.payload[0], 0x4B, "Opus TOC — parsed, never decoded, in this crate");
+        assert_eq!(
+            p.payload.len(),
+            40,
+            "every captured voice payload is 40 bytes"
+        );
+        assert_eq!(
+            p.payload[0], 0x4B,
+            "Opus TOC — parsed, never decoded, in this crate"
+        );
         assert_eq!(p.index, 0);
 
         // Bare `parse` cannot do this and says so rather than guessing: the frame comes
         // back as a routing instruction.
         let frame = decode_device(&hex(VOICE)).unwrap();
-        assert!(matches!(parse(&frame), DeviceEvent::VoiceFrame { cmd: 0x46, .. }));
+        assert!(matches!(
+            parse(&frame),
+            DeviceEvent::VoiceFrame { cmd: 0x46, .. }
+        ));
     }
 
     /// A `0x46` with no preceding `0x97` recovers the capture rather than dropping the
@@ -1840,15 +1938,23 @@ mod tests {
     fn a_voice_end_with_no_capture_open_reports_ignored_rather_than_an_end() {
         let mut parser = Parser::new();
         let end = encode_device(op::VOICE_END, &[0x00]);
-        assert_eq!(parser.push(&end), vec![DeviceEvent::Voice(VoiceEvent::Ignored)]);
+        assert_eq!(
+            parser.push(&end),
+            vec![DeviceEvent::Voice(VoiceEvent::Ignored)]
+        );
 
         parser.push(&hex("ac550003970198"));
         assert_eq!(
             parser.push(&end),
-            vec![DeviceEvent::Voice(VoiceEvent::Ended(EndCause::DeviceSignalled))]
+            vec![DeviceEvent::Voice(VoiceEvent::Ended(
+                EndCause::DeviceSignalled
+            ))]
         );
         assert!(!parser.is_capturing());
-        assert_eq!(parser.push(&end), vec![DeviceEvent::Voice(VoiceEvent::Ignored)]);
+        assert_eq!(
+            parser.push(&end),
+            vec![DeviceEvent::Voice(VoiceEvent::Ignored)]
+        );
     }
 
     /// The mic closes on an app WRITE, so the parser has to be told. Nothing inbound
@@ -1906,7 +2012,11 @@ mod tests {
             ("ac550003320133", AppCommand::Volume, &[0x01]),
             ("ac550003340135", AppCommand::VoiceRecording, &[0x01]),
             ("ac550003560056", AppCommand::InterruptVoice, &[0x00]),
-            ("ac55000444300175", AppCommand::FileDownloadComplete, &[0x30, 0x01]),
+            (
+                "ac55000444300175",
+                AppCommand::FileDownloadComplete,
+                &[0x30, 0x01],
+            ),
             (
                 "ac550008591a071b122812e1",
                 AppCommand::SendPhoneTime,
@@ -1988,12 +2098,12 @@ mod tests {
     #[test]
     fn the_captured_connect_sequence_parses_end_to_end_from_one_blob() {
         const CONNECT: &[&str] = &[
-            "ac550006950000040ba4",       // capability push, ~30 ms after link-up
-            "ac550008591a071b140334e0",   // phone-time echo
-            "ac550009550104080103010269", // versions
+            "ac550006950000040ba4",         // capability push, ~30 ms after link-up
+            "ac550008591a071b140334e0",     // phone-time echo
+            "ac550009550104080103010269",   // versions
             "ac55000a645431000030333033af", // identity
-            "ac550005173a300182",         // battery 100 %, charging
-            "ac550003013132",             // ── 0x48 burst ──
+            "ac550005173a300182",           // battery 100 %, charging
+            "ac550003013132",               // ── 0x48 burst ──
             "ac5500040200b4b6",
             "ac550003043135",
             "ac550003063137",
@@ -2024,7 +2134,10 @@ mod tests {
         }
         assert!(states.is_complete(), "the burst filled every field");
         assert_eq!(states.record_seconds(), Some(180));
-        assert_eq!(states.gesture(GestureSlot::TripleTap), Some(GestureAction::NextTrack));
+        assert_eq!(
+            states.gesture(GestureSlot::TripleTap),
+            Some(GestureAction::NextTrack)
+        );
 
         assert!(events.contains(&DeviceEvent::Battery(BatteryReading {
             percent: 100,
